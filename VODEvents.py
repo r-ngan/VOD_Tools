@@ -1,6 +1,6 @@
 from pubsub import pub
 
-VOD_START = 'VSTART'
+VOD_START = 'VSTART' # shared with ImgEvent.INIT
 VOD_FRAME = 'VFRAME'
 VOD_END = 'VEND'
 BOT_APPEAR = 'BSTART'

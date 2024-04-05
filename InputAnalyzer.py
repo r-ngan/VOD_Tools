@@ -32,9 +32,9 @@ class InputAnalyzer(VideoAnalysis.Analyzer):
     def initialize(self, **kwargs):
         super().initialize(**kwargs)
         
-    def proc_frame(self, timestamp, img, img_delta):
-        super().proc_frame(timestamp=timestamp, img=img, img_delta=img_delta)
-        kbcrop = img_delta[self.y1:self.y2, self.x1:self.x2,:]
+    def proc_frame(self, timestamp, img, aux_imgs={}):
+        super().proc_frame(timestamp=timestamp, img=img, aux_imgs=aux_imgs)
+        kbcrop = aux_imgs['delta'][self.y1:self.y2, self.x1:self.x2,:]
         
         for rule in self.detect:
             value = self.threshold(kbcrop, rule)

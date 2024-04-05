@@ -8,8 +8,8 @@ import VideoAnalysis
 import VODEvents
 
 class MockAnalyzer(VideoAnalysis.Analyzer):
-    def proc_frame(self, timestamp, img, img_delta):
-        super().proc_frame(timestamp=timestamp, img=img, img_delta=img_delta)
+    def proc_frame(self, timestamp, img, aux_imgs={}):
+        super().proc_frame(timestamp=timestamp, img=img, aux_imgs=aux_imgs)
         for line in mock_json:
             if line['timestamp'] == timestamp:
                 botx, boty = line['x']-self.midx, line['y']-self.midy

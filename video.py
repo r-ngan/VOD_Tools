@@ -1,5 +1,6 @@
 import math
 import sys
+import time
 import traceback
 import json
 from pubsub import pub
@@ -7,27 +8,33 @@ import numpy as np
 import cv2
 
 import VODEvents
-import VODState
 import Capture
 import VideoAnalysis
+from ImgProc import ImgEvents
 
 #import automatically activates the module
+#import ImgProc.Delta
+#import ImgProc.OpticFlow
 import InputAnalyzer
 import DefaultEvRouter
 import RangeStats
+import PoseAnalyzer
 
 mousex = 0
 mousey = 0
 mouse_text = ''
 frame_num = 0
 frame_data = np.array([])
+frame_db = {}
+frame_wait = False
+waiters = []
     
 def get_mouse(event, x, y, flags, param):
     global mouse_text, frame_data
     if event == cv2.EVENT_LBUTTONDOWN:
         mousex = x
         mousey = y
-        value = frame_data[y,x,:]#VideoAnalysis.dbg_frame[y,x]
+        value = frame_data[y,x,:]
         pub.sendMessage(Capture.MOUSE_START,
                     timestamp= value,
                     x= mousex,
@@ -53,12 +60,27 @@ def draw_text(frame, text, x, y):
         lineType)
 
 def dbg_event(topic=pub.AUTO_TOPIC, **kwargs):
-    if not topic.getName() == VODEvents.VOD_FRAME:
+    if (not topic.getName() == VODEvents.VOD_FRAME) and \
+        (not topic.getName() == ImgEvents.PREPROCESS) and \
+        (not topic.getName() == ImgEvents.APPEND) and \
+        (not topic.getName() == ImgEvents.DONE):
         print ('event %s / %s'%(topic.getName(), kwargs))
 
+def frame_append(key, imgdata, topic=pub.AUTO_TOPIC, **kwargs):
+    global frame_db
+    if key in frame_db:
+        print ('!warning: %s already in frame db'%(key))
+    frame_db[key] = imgdata
+    
+def frame_delay(id, topic=pub.AUTO_TOPIC, **kwargs): # at least one module requesting wait
+    global frame_wait, waiters
+    frame_wait = True
+    waiters.append(id)
+
 def main(args):
-    global frame_data, frame_num
-    cap = cv2.VideoCapture('test.mkv')
+    global frame_data, frame_num, frame_db, frame_wait, waiters
+    cap = cv2.VideoCapture(#'game.mp4')
+                            'test.mkv')
     if not cap.isOpened():
         print ('error opening')
         return
@@ -66,8 +88,10 @@ def main(args):
     #pub.subscribe(cb2, VODEvents.BOT_APPEAR)
     #pub.sendMessage(Capture.BOT_START, data={'test':'test1'})
     
+    SKIP_FRAMES = 205 # skip VOD preamble
+    cap.set(cv2.CAP_PROP_POS_FRAMES, SKIP_FRAMES-1)
+    frame_num = SKIP_FRAMES
     ret, frame = cap.read()
-    fnext = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.int16)
     ydim, xdim, depth = frame.shape
     midx = xdim//2
     midy = ydim//2
@@ -75,64 +99,62 @@ def main(args):
     frames_total = int(cap.get( cv2.CAP_PROP_FRAME_COUNT))
     print ('Video = %s @ %s fps. %s frames'%(frame.shape,frate, frames_total))
     pub.subscribe(dbg_event, pub.ALL_TOPICS)
+    pub.subscribe(frame_append, ImgEvents.APPEND)
+    pub.subscribe(frame_delay, ImgEvents.DELAY)
     pub.sendMessage(VODEvents.VOD_START, 
                     width= xdim,
                     height= ydim,
                     depth= depth,
-                    frame_rate= frate,)
+                    frame_rate= frate,) # initialize all modules
     
     cv2.namedWindow('frame')
     cv2.setMouseCallback('frame', get_mouse)
-    frame_num = 0
-    SKIP_FRAMES = 210 #185 # skip VOD preamble
-    show_delta = False
-    flow = None
+    show_delta = True
+    autoplay = False
     while(cap.isOpened()):
         lframe = frame
-        fprev = fnext
         ret, frame = cap.read()
-        if not ret:
+        if not ret: # out of frames, VOD done
             break
-        fnext = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.int16)
         frame_num += 1
         if frame_num < SKIP_FRAMES:
             continue
-        delta = frame.astype(np.int16) - lframe # allow negative range, >128 delta
-        fdelta = fnext - fprev
+            
+        # reset frame db
+        frame_db.clear()
+        frame_db['base'] = frame
+        frame_db['last'] = lframe
+        frame_db['debug'] = frame
         
+        frame_wait = True
+        while (frame_wait):
+            frame_wait = False
+            waiters.clear()
+            db_size = len(frame_db)
+            pub.sendMessage(ImgEvents.PREPROCESS,
+                        timestamp= frame_num,
+                        img= frame,
+                        aux_imgs= frame_db,)
+            if frame_wait: # wait requested
+                curr_db_size = len(frame_db)
+                if curr_db_size<=db_size: # no changes since last cycle, stuck
+                    print ('preprocess done, some modules failed: %s'%(waiters))
+                    break
+                # it is a legit wait
+        pub.sendMessage(ImgEvents.DONE) # preprocessing is done, clean up
+        
+        # all preprocessors done, go to analysis
         pub.sendMessage(VODEvents.VOD_FRAME,
                     timestamp= frame_num,
                     img= frame,
-                    img_delta= delta,)
+                    aux_imgs= frame_db,)
         # continue # skip user interface
         
-        ''' calculate flow info
-        abd = np.abs(fdelta)
-        #print ('max=%s motion=%s'%(abd.max(), (abd>40).sum() ))
-        
-        CLIP_E = 50 # remove border pixels
-        flow = cv2.calcOpticalFlowFarneback(fprev, fnext, flow, 0.5, 6, 35, 3, 5, 1.1, cv2.OPTFLOW_FARNEBACK_GAUSSIAN)
-        
-        mag_flow = np.sqrt(flow[...,0]**2 + flow[...,1]**2)
-        
-        avg_flow = (np.mean(flow[CLIP_E:-CLIP_E,CLIP_E:-CLIP_E,0]),
-                    np.mean(flow[CLIP_E:-CLIP_E,CLIP_E:-CLIP_E,1]))
-        avg_mag = 100*math.sqrt(avg_flow[0]**2+ avg_flow[1]**2)
-        max_flow = np.max(mag_flow[CLIP_E:-CLIP_E,CLIP_E:-CLIP_E])
-        #print ('magflow=%0.5f max=%s'%(avg_mag, max_flow))
-        mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
-        hsv = np.zeros_like(frame)
-        hsv[..., 1] = 255
-        hsv[..., 0] = ang*180/np.pi/2
-        hsv[..., 2] = np.clip(mag*2,0,255)
-        bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR) #'''
-        
-        frame_data = delta
-        #dout = np.array(delta*100)
-        
-        #flint = flow.astype(np.int16)
-        #dout = np.zeros_like(fnext).astype(np.int16)
-        dout = np.array(delta)
+        frame_data = frame
+        if 'debug' in frame_db:
+            dout = frame_db['debug']
+        else:
+            dout = VideoAnalysis.dbg_frame
         ''' turn flow into prediction image
         uvmap = np.indices((ydim, xdim)).astype(np.int16)
         uvmap[1] -= flint[...,0]
@@ -165,11 +187,19 @@ def main(args):
             
             draw_text(output, '%d'%(frame_num), 1800,50)
             cv2.imshow('frame',output)
-            key = cv2.waitKey(20)
+            key = cv2.pollKey()
+            
             if key==-1:
-                continue
+                if autoplay:
+                    break
+                else:
+                    time.sleep(0.060)
+                    continue
             if key==ord('f'): # flip display
                 show_delta = not show_delta
+                continue
+            if key==ord('k'): # play/pause
+                autoplay = not autoplay
                 continue
             break # any other key is go next frame
         
