@@ -13,12 +13,16 @@ DEBUG=False
 VIS_SIZE = 400
 VIS_SCALE = VIS_SIZE/ 80. # 80 px movement is full span
 KERN_SIZE = 15
-CLUSTERS = 6
-DOWNSCALE = 2
+CLUSTERS = 4
+DOWNSCALE = 3
 class OpticFlow(Preprocessor.Preprocessor):
 
     def initialize(self, **kwargs):
         super().initialize(**kwargs)
+        self.last_fprev = np.array([])
+        self.last_fprev_hash = 0
+        
+        
         self.STRENGTH = 1e6/(self.xdim*self.ydim*self.depth)
         
         XSTEP = 20
@@ -33,8 +37,17 @@ class OpticFlow(Preprocessor.Preprocessor):
         hsv[self.y, self.x, 0] = ang[...,0]*180/np.pi/2
         self.hue = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR).astype(np.float32)/255.
         
-        #self.regress = AgglomerativeClustering(n_clusters=None, distance_threshold=90, linkage='ward')
         self.regress = BisectingKMeans(n_clusters=CLUSTERS, bisecting_strategy='biggest_inertia')
+        
+    def get_lastgray(self, img):
+        if hash(img.data.tobytes()) == self.last_fprev_hash:
+            return self.last_fprev
+        else:
+            return None
+        
+    def cache_lastgray(self, img, fnext):
+        self.last_fprev = fnext
+        self.last_fprev_hash = hash(img.data.tobytes())
         
     def flowviz(self, flow):
         
@@ -53,7 +66,7 @@ class OpticFlow(Preprocessor.Preprocessor):
         # cluster flow to find representative motion
         if moving.sum()>100:
             flist = flow[fy,fx].reshape(-1,2)
-            cent = get_avg_flow(flow[fy,fx])
+            cent, cvar = get_avg_flow(flow[fy,fx])
             pos = (VIS_SIZE/2+cent*VIS_SCALE).astype(int)
             cv2.circle(vis, pos, 5, (0,0,255),1)
             
@@ -75,7 +88,7 @@ class OpticFlow(Preprocessor.Preprocessor):
     
     def proc_frame(self, timestamp, img, aux_imgs={}):
         if not self.check_requirements(aux_imgs, ['base', 'last', 'abs_delta']):
-            return
+            return False
         lframe = aux_imgs['last']
         frame = aux_imgs['base']
         abs_delta = aux_imgs['abs_delta'] # abs_delta to check moving
@@ -88,35 +101,47 @@ class OpticFlow(Preprocessor.Preprocessor):
             moving = True
             pub.sendMessage(ImgEvents.APPEND, key='moving', imgdata=[True])
         
-        if moving: # only calculate optic flow if sufficient movement
-            fprev = cv2.resize(cv2.cvtColor(lframe, cv2.COLOR_BGR2GRAY),
-                                (0, 0), fx=1./DOWNSCALE, fy=1./DOWNSCALE).astype(np.int16)
+        if True or moving: # only calculate optic flow if sufficient movement
             fnext = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY),
                                 (0, 0), fx=1./DOWNSCALE, fy=1./DOWNSCALE).astype(np.int16)
-            CLIP_E = 50 # remove border pixels
+            fprev = self.get_lastgray(lframe)
+            if fprev is None:
+                fprev = cv2.resize(cv2.cvtColor(lframe, cv2.COLOR_BGR2GRAY),
+                                    (0, 0), fx=1./DOWNSCALE, fy=1./DOWNSCALE).astype(np.int16)
+            self.cache_lastgray(frame, fnext)
             flow = cv2.calcOpticalFlowFarneback(fprev, fnext, None, 0.5, 6, 35, 3, 5, 1.1, cv2.OPTFLOW_FARNEBACK_GAUSSIAN)
             flow = cv2.resize(flow*DOWNSCALE, (0, 0), fx=DOWNSCALE, fy=DOWNSCALE)
-            # mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
-            # hsv = np.zeros_like(frame)
-            # hsv[..., 0] = ang*180/np.pi/2
-            # hsv[..., 1] = 255
-            # hsv[..., 2] = np.clip(np.sqrt(mag)*20,0,255)
-            #flowviz = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+            
+            mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+            hsv = np.zeros_like(frame)
+            hsv[..., 0] = ang*180/np.pi/2
+            hsv[..., 1] = 255
+            hsv[..., 2] = np.clip(np.sqrt(mag)*40,0,255)
+            flowviz = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+            
+            # show flow arrows on debug
+            YGRID = 30
+            XGRID = 30
+            y,x = np.mgrid[YGRID/2:self.ydim:YGRID, XGRID/2:self.xdim:XGRID].reshape(2,-1).astype(int)
+            u,v = (x+flow[y,x,0]).round().astype(int), (y+flow[y,x,1]).round().astype(int)
+            for x1,y1,x2,y2 in [(a,b,c,d) for a,b,c,d in zip (x,y, u,v) if a!=c or b!=d]:
+                cv2.line(flowviz, (x1,y1), (x2,y2), (0,255,0), 1)
             
         else:
             flow = np.zeros_like(frame)[...,:2]
+            flowviz = np.zeros_like(frame)
     
         if DEBUG:
             heatmap = self.flowviz(flow)
-            flowviz = np.array(frame)
             flowviz[0:400,0:400,:] = heatmap
             pub.sendMessage(ImgEvents.APPEND, key='debug', imgdata=flowviz)
         
         pub.sendMessage(ImgEvents.APPEND, key='flow', imgdata=flow)
+        return True
 
 def get_avg_flow(flow):
     flist = flow.reshape(-1,2)
-    cent = np.mean(flist,0)
+    #cent = np.mean(flist,0) # clustering center is more accurate than mean
     
     regress = BisectingKMeans(n_clusters=CLUSTERS, bisecting_strategy='biggest_inertia')
     km = regress.fit(flist)
@@ -128,6 +153,10 @@ def get_avg_flow(flow):
     
     for ix in modes:
         cent = np.mean(flist[km.labels_==ix],0)
-        return cent
+        vals = regress.transform(flist[km.labels_==ix])[:,ix]
+        vari = 0
+        if len(vals)>3:
+            vari = np.var(vals)
+        return cent, vari
 
 _ = OpticFlow()

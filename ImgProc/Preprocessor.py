@@ -44,9 +44,10 @@ class Preprocessor():
             if x not in frame_db: # missing requirement, stall
                 pub.sendMessage(ImgEvents.DELAY, id=str(self.__class__))
                 return False
-        self.frame_done = True
+        self.frame_done = True # cannot double-check requirements, it will cause skip
         return True
         
     def proc_frame(self, timestamp, img, aux_imgs={}):
         if not self.check_requirements(aux_imgs, []):
-            return
+            return False
+        return True

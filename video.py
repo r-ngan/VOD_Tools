@@ -15,10 +15,12 @@ from ImgProc import ImgEvents
 #import automatically activates the module
 #import ImgProc.Delta
 #import ImgProc.OpticFlow
+#import ImgProc.BotPose
 import InputAnalyzer
-import DefaultEvRouter
-import RangeStats
+import MoveAnalyzer
 import PoseAnalyzer
+import DefaultEvRouter
+from RangeStats import RangeStats
 
 mousex = 0
 mousey = 0
@@ -28,6 +30,7 @@ frame_data = np.array([])
 frame_db = {}
 frame_wait = False
 waiters = []
+logstream = sys.stdout
     
 def get_mouse(event, x, y, flags, param):
     global mouse_text, frame_data
@@ -40,8 +43,9 @@ def get_mouse(event, x, y, flags, param):
                     x= mousex,
                     y= mousey,)
     #mouse_text = '(%d,%d)'%(x, y)
-    value = frame_data[y,x,:]
-    mouse_text = '(%s)'%(value)
+    flow = frame_db['flow'][y,x]
+    value = '%7.3f %7.3f %7.3f'%(np.linalg.norm(flow), flow[0], flow[1])
+    mouse_text = '%s'%(value)
 
 def draw_text(frame, text, x, y):
     font                   = cv2.FONT_HERSHEY_SIMPLEX
@@ -60,11 +64,13 @@ def draw_text(frame, text, x, y):
         lineType)
 
 def dbg_event(topic=pub.AUTO_TOPIC, **kwargs):
+    global logstream
     if (not topic.getName() == VODEvents.VOD_FRAME) and \
         (not topic.getName() == ImgEvents.PREPROCESS) and \
         (not topic.getName() == ImgEvents.APPEND) and \
-        (not topic.getName() == ImgEvents.DONE):
-        print ('event %s / %s'%(topic.getName(), kwargs))
+        (not topic.getName() == ImgEvents.DONE) and \
+        (not topic.getName().startswith('capture.')):
+        print ('event %s / %s'%(topic.getName(), kwargs), file=logstream)
 
 def frame_append(key, imgdata, topic=pub.AUTO_TOPIC, **kwargs):
     global frame_db
@@ -78,19 +84,16 @@ def frame_delay(id, topic=pub.AUTO_TOPIC, **kwargs): # at least one module reque
     waiters.append(id)
 
 def main(args):
-    global frame_data, frame_num, frame_db, frame_wait, waiters
-    cap = cv2.VideoCapture(#'game.mp4')
+    global logstream, frame_data, frame_num, frame_db, frame_wait, waiters
+    cap = cv2.VideoCapture(#'move_test3.mp4')
                             'test.mkv')
     if not cap.isOpened():
         print ('error opening')
         return
-        
-    #pub.subscribe(cb2, VODEvents.BOT_APPEAR)
-    #pub.sendMessage(Capture.BOT_START, data={'test':'test1'})
     
-    SKIP_FRAMES = 205 # skip VOD preamble
+    SKIP_FRAMES = 180 # skip VOD preamble
     cap.set(cv2.CAP_PROP_POS_FRAMES, SKIP_FRAMES-1)
-    frame_num = SKIP_FRAMES
+    frame_num = SKIP_FRAMES-1
     ret, frame = cap.read()
     ydim, xdim, depth = frame.shape
     midx = xdim//2
@@ -98,121 +101,126 @@ def main(args):
     frate = cap.get(cv2.CAP_PROP_FPS)
     frames_total = int(cap.get( cv2.CAP_PROP_FRAME_COUNT))
     print ('Video = %s @ %s fps. %s frames'%(frame.shape,frate, frames_total))
-    pub.subscribe(dbg_event, pub.ALL_TOPICS)
-    pub.subscribe(frame_append, ImgEvents.APPEND)
-    pub.subscribe(frame_delay, ImgEvents.DELAY)
-    pub.sendMessage(VODEvents.VOD_START, 
-                    width= xdim,
-                    height= ydim,
-                    depth= depth,
-                    frame_rate= frate,) # initialize all modules
     
-    cv2.namedWindow('frame')
-    cv2.setMouseCallback('frame', get_mouse)
+    
     show_delta = True
-    autoplay = False
-    while(cap.isOpened()):
-        lframe = frame
-        ret, frame = cap.read()
-        if not ret: # out of frames, VOD done
-            break
-        frame_num += 1
-        if frame_num < SKIP_FRAMES:
-            continue
-            
-        # reset frame db
-        frame_db.clear()
-        frame_db['base'] = frame
-        frame_db['last'] = lframe
-        frame_db['debug'] = frame
+    autoplay = True
+    def breakpoint(timestamp=0, x=0, y=0):
+        nonlocal autoplay
+        autoplay = False
+    #pub.subscribe(breakpoint, VODEvents.BOT_APPEAR) # pause at certain events
+    #pub.subscribe(breakpoint, VODEvents.KEY_ANY_DOWN) # pause at certain events
+    
+    with open('zlog.txt', 'w', buffering=1) as logfile: # line buffered
+        logstream = logfile
+        pub.subscribe(dbg_event, pub.ALL_TOPICS)
+        pub.subscribe(frame_append, ImgEvents.APPEND)
+        pub.subscribe(frame_delay, ImgEvents.DELAY)
+        pub.sendMessage(VODEvents.VOD_START, 
+                        width= xdim,
+                        height= ydim,
+                        depth= depth,
+                        frame_rate= frate,) # initialize all modules
+                        
+                        
         
-        frame_wait = True
-        while (frame_wait):
-            frame_wait = False
-            waiters.clear()
-            db_size = len(frame_db)
-            pub.sendMessage(ImgEvents.PREPROCESS,
+        cv2.namedWindow('VODTool')
+        cv2.setMouseCallback('VODTool', get_mouse)
+        while(cap.isOpened()):
+            lframe = frame
+            ret, frame = cap.read()
+            if not ret: # out of frames, VOD done
+                break
+            frame_num += 1
+            if frame_num < SKIP_FRAMES:
+                continue
+                
+            # reset frame db
+            frame_db.clear()
+            frame_db['base'] = frame
+            frame_db['last'] = lframe
+            frame_db['debug'] = frame
+            
+            frame_wait = True
+            while (frame_wait): # preprocessors can request wait if out of order due to pubsub, forms a DAG of processing
+                frame_wait = False
+                waiters.clear()
+                db_size = len(frame_db)
+                pub.sendMessage(ImgEvents.PREPROCESS,
+                            timestamp= frame_num,
+                            img= frame,
+                            aux_imgs= frame_db,)
+                if frame_wait: # wait requested
+                    curr_db_size = len(frame_db)
+                    if curr_db_size<=db_size: # no changes since last cycle, stuck
+                        print ('preprocess done, some modules failed: %s'%(waiters))
+                        break
+            pub.sendMessage(ImgEvents.DONE) # preprocessing is done, clean up
+            
+            # all preprocessors done, go to analysis
+            pub.sendMessage(VODEvents.VOD_FRAME,
                         timestamp= frame_num,
                         img= frame,
                         aux_imgs= frame_db,)
-            if frame_wait: # wait requested
-                curr_db_size = len(frame_db)
-                if curr_db_size<=db_size: # no changes since last cycle, stuck
-                    print ('preprocess done, some modules failed: %s'%(waiters))
-                    break
-                # it is a legit wait
-        pub.sendMessage(ImgEvents.DONE) # preprocessing is done, clean up
-        
-        # all preprocessors done, go to analysis
-        pub.sendMessage(VODEvents.VOD_FRAME,
-                    timestamp= frame_num,
-                    img= frame,
-                    aux_imgs= frame_db,)
-        # continue # skip user interface
-        
-        frame_data = frame
-        if 'debug' in frame_db:
-            dout = frame_db['debug']
-        else:
-            dout = VideoAnalysis.dbg_frame
-        ''' turn flow into prediction image
-        uvmap = np.indices((ydim, xdim)).astype(np.int16)
-        uvmap[1] -= flint[...,0]
-        uvmap[1,uvmap[1,...]<0] = 0
-        uvmap[1,uvmap[1,...]>=xdim] = 0
-        uvmap[0] -= flint[...,1]
-        uvmap[0,uvmap[0,...]<0] = 0
-        uvmap[0,uvmap[0,...]>=ydim] = 0
-        frame16 = fprev.astype(np.int16)
-        for y in range(0,ydim):
-            for x in range(0,xdim):
-                v,u = uvmap[0, y,x], uvmap[1, y,x]
-                dout[y,x] = frame16[v,u]#-lframe[y,x] #'''
+            # continue # skip user interface
             
-        ''' show flow arrows on debug
-        for y in range(0,ydim,30):
-            for x in range(0,xdim,30):
-                u,v = x+flint[y,x,0], y+flint[y,x,1]
-                cv2.line(dout, (x,y), ((x+u)//2,(y+v)//2), (0,255,0), 1)
-                cv2.line(dout, ((x+u)//2,(y+v)//2), (u,v), (0,0,255), 1) #'''
-        while (1): # show frame and wait for user input
-            if show_delta:
-                output = np.array(dout)
-                #output = np.array(np.abs(delta)*100)
-                #output = np.array(VideoAnalysis.dbg_frame)
+            frame_data = frame
+            if 'debug' in frame_db:
+                dout = frame_db['debug']
             else:
-                output = np.array(frame)
-            cv2.rectangle(output,(midx-1,midy-1),(midx+1,midy+1),(255,255,255),1)
-            draw_text(output, mouse_text, 50,50)
-            
-            draw_text(output, '%d'%(frame_num), 1800,50)
-            cv2.imshow('frame',output)
-            key = cv2.pollKey()
-            
-            if key==-1:
-                if autoplay:
-                    break
+                dout = VideoAnalysis.dbg_frame
+            ''' turn flow into prediction image
+            uvmap = np.indices((ydim, xdim)).astype(np.int16)
+            uvmap[1] -= flint[...,0]
+            uvmap[1,uvmap[1,...]<0] = 0
+            uvmap[1,uvmap[1,...]>=xdim] = 0
+            uvmap[0] -= flint[...,1]
+            uvmap[0,uvmap[0,...]<0] = 0
+            uvmap[0,uvmap[0,...]>=ydim] = 0
+            frame16 = fprev.astype(np.int16)
+            for y in range(0,ydim):
+                for x in range(0,xdim):
+                    v,u = uvmap[0, y,x], uvmap[1, y,x]
+                    dout[y,x] = frame16[v,u]#-lframe[y,x] #'''
+                
+            while (1): # show frame and wait for user input
+                if show_delta:
+                    output = np.array(dout)
                 else:
-                    time.sleep(0.060)
+                    output = np.array(frame)
+                #cv2.rectangle(output,(midx-1,midy-1),(midx+1,midy+1),(255,255,255),1)
+                draw_text(output, mouse_text, 50,50)
+                
+                draw_text(output, '%d'%(frame_num), 1800,50)
+                cv2.imshow('VODTool',output)
+                key = cv2.pollKey()
+                
+                if key==-1:
+                    if autoplay:
+                        break
+                    else:
+                        time.sleep(0.060)
+                        continue
+                if key==ord('f'): # flip display
+                    show_delta = not show_delta
                     continue
-            if key==ord('f'): # flip display
-                show_delta = not show_delta
-                continue
-            if key==ord('k'): # play/pause
-                autoplay = not autoplay
-                continue
-            break # any other key is go next frame
-        
-        if key & 0xFF == ord('q'): # exit condition
-            break
-
-    with open('zz2.csv', 'w') as dumpfile:
-        for x in InputAnalyzer.key_data:
-            dumpfile.write('%s\n'%(x))
+                if key==ord('k'): # play/pause
+                    autoplay = not autoplay
+                    continue
+                break # any other key is go next frame
+            
+            if key & 0xFF == ord('q'): # exit condition
+                break
+        print ('%s'%(RangeStats.datastore), file=logstream)
+    print ('total trials = %d'%(RangeStats.trial_count))
+    RangeStats.summarize()
+    #with open('zz2.csv', 'w') as dumpfile:
+    #    for x in InputAnalyzer.key_data:
+    #        dumpfile.write('%s\n'%(x))
     cap.release()
     cv2.destroyAllWindows()
 
-    print ("ok finished")
+    print ('ok finished')
     
 
 

@@ -25,7 +25,7 @@ class Capture:
         pub.subscribe(self.initialize, VODEvents.VOD_START)
         pub.subscribe(self.event, CAPTURE_TOPIC)
     
-    def initialize(self, topic=pub.AUTO_TOPIC, **data):
+    def initialize(self, **data):
         if _WIDTH_KEY in data:
             self.xdim = data[_WIDTH_KEY]
         if _HEIGHT_KEY in data:
