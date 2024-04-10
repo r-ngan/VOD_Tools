@@ -8,7 +8,7 @@ from ultralytics import YOLO
 from ImgProc import ImgEvents, Preprocessor
 from ImgProc import Delta, OpticFlow # dependency for generation
 
-DEBUG=True
+DEBUG=False
 
 # find location of bots and presents them for analyzers to use
 # Theory of operation:
@@ -93,7 +93,7 @@ class BotPose(Preprocessor.Preprocessor):
             
         poses = []
         add_pose = False
-        dbg_img = aux_imgs['debug'] if DEBUG else None
+        dbg_img = aux_imgs['debug'][0] if DEBUG else None
         if self.bot_track: # light update based on flow, pose check
             head_bound = self.get_headbox()
             flimg = subimage(aux_imgs['flow'], head_bound)

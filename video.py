@@ -14,7 +14,7 @@ from ImgProc import ImgEvents
 
 #import automatically activates the module
 #import ImgProc.Delta
-#import ImgProc.OpticFlow
+from ImgProc import OpticFlow
 #import ImgProc.BotPose
 import InputAnalyzer
 import MoveAnalyzer
@@ -31,7 +31,7 @@ frame_db = {}
 frame_wait = False
 waiters = []
 logstream = sys.stdout
-    
+
 def get_mouse(event, x, y, flags, param):
     global mouse_text, frame_data
     if event == cv2.EVENT_LBUTTONDOWN:
@@ -44,7 +44,10 @@ def get_mouse(event, x, y, flags, param):
                     y= mousey,)
     #mouse_text = '(%d,%d)'%(x, y)
     flow = frame_db['flow'][y,x]
-    value = '%7.3f %7.3f %7.3f'%(np.linalg.norm(flow), flow[0], flow[1])
+    flow2 = frame_db['flow2'][y,x]
+    value = '%7.3f %7.3f %7.3f\n%7.3f %7.3f %7.3f'%\
+            (np.linalg.norm(flow), flow[0], flow[1],
+            np.linalg.norm(flow2), flow2[0], flow2[1])
     mouse_text = '%s'%(value)
 
 def draw_text(frame, text, x, y):
@@ -74,9 +77,12 @@ def dbg_event(topic=pub.AUTO_TOPIC, **kwargs):
 
 def frame_append(key, imgdata, topic=pub.AUTO_TOPIC, **kwargs):
     global frame_db
-    if key in frame_db:
-        print ('!warning: %s already in frame db'%(key))
-    frame_db[key] = imgdata
+    if key=='debug':
+        frame_db[key].append(imgdata)
+    else:
+        if key in frame_db:
+            print ('!warning: %s already in frame db'%(key))
+        frame_db[key] = imgdata
     
 def frame_delay(id, topic=pub.AUTO_TOPIC, **kwargs): # at least one module requesting wait
     global frame_wait, waiters
@@ -85,13 +91,14 @@ def frame_delay(id, topic=pub.AUTO_TOPIC, **kwargs): # at least one module reque
 
 def main(args):
     global logstream, frame_data, frame_num, frame_db, frame_wait, waiters
-    cap = cv2.VideoCapture(#'move_test3.mp4')
-                            'test.mkv')
+    cap = cv2.VideoCapture('move_test3.mp4')
+                            #'test2023-09-15.mkv')
+                            #'look_test.mp4')
     if not cap.isOpened():
         print ('error opening')
         return
     
-    SKIP_FRAMES = 180 # skip VOD preamble
+    SKIP_FRAMES = 480 # skip VOD preamble
     cap.set(cv2.CAP_PROP_POS_FRAMES, SKIP_FRAMES-1)
     frame_num = SKIP_FRAMES-1
     ret, frame = cap.read()
@@ -103,13 +110,19 @@ def main(args):
     print ('Video = %s @ %s fps. %s frames'%(frame.shape,frate, frames_total))
     
     
-    show_delta = True
+    show_img = 0
     autoplay = True
     def breakpoint(timestamp=0, x=0, y=0):
         nonlocal autoplay
         autoplay = False
     #pub.subscribe(breakpoint, VODEvents.BOT_APPEAR) # pause at certain events
     #pub.subscribe(breakpoint, VODEvents.KEY_ANY_DOWN) # pause at certain events
+    
+    path_hist = []
+    def del_path(timestamp=0, x=0, y=0):
+        nonlocal path_hist
+        path_hist.clear()
+    pub.subscribe(del_path, VODEvents.BOT_APPEAR) # clear path at event
     
     with open('zlog.txt', 'w', buffering=1) as logfile: # line buffered
         logstream = logfile
@@ -121,14 +134,16 @@ def main(args):
                         height= ydim,
                         depth= depth,
                         frame_rate= frate,) # initialize all modules
-                        
-                        
         
         cv2.namedWindow('VODTool')
         cv2.setMouseCallback('VODTool', get_mouse)
+        PAUSE = False
         while(cap.isOpened()):
-            lframe = frame
-            ret, frame = cap.read()
+            if not PAUSE:
+                lframe = frame
+                ret, frame = cap.read()
+            else:
+                PAUSE = False
             if not ret: # out of frames, VOD done
                 break
             frame_num += 1
@@ -139,7 +154,7 @@ def main(args):
             frame_db.clear()
             frame_db['base'] = frame
             frame_db['last'] = lframe
-            frame_db['debug'] = frame
+            frame_db['debug'] = []
             
             frame_wait = True
             while (frame_wait): # preprocessors can request wait if out of order due to pubsub, forms a DAG of processing
@@ -164,11 +179,10 @@ def main(args):
                         aux_imgs= frame_db,)
             # continue # skip user interface
             
+            if 'pred_cam' in frame_db:
+                cam_params = frame_db['pred_cam']
+                path_hist.append(cam_params)
             frame_data = frame
-            if 'debug' in frame_db:
-                dout = frame_db['debug']
-            else:
-                dout = VideoAnalysis.dbg_frame
             ''' turn flow into prediction image
             uvmap = np.indices((ydim, xdim)).astype(np.int16)
             uvmap[1] -= flint[...,0]
@@ -184,10 +198,25 @@ def main(args):
                     dout[y,x] = frame16[v,u]#-lframe[y,x] #'''
                 
             while (1): # show frame and wait for user input
-                if show_delta:
-                    output = np.array(dout)
+                if show_img>0:
+                    output = np.array(frame_db['debug'][show_img-1])
                 else:
                     output = np.array(frame)
+                    
+                loc = np.array([midx,midy])
+                for xy in path_hist[::-1]:
+                    mag = np.linalg.norm(xy)
+                    MAG_LIM = 20
+                    mag = min(MAG_LIM,mag) # cap to limit
+                    color = [0,128*mag/MAG_LIM,200*mag/MAG_LIM]
+                    color = tuple(int(x) for x in color)
+                    newloc = loc+xy
+                    x1 = int(loc[0])
+                    y1 = int(loc[1])
+                    x2 = int(newloc[0])
+                    y2 = int(newloc[1])
+                    cv2.line(output, (x1,y1), (x2,y2), color, int(1+2.5*mag/MAG_LIM))
+                    loc = newloc
                 #cv2.rectangle(output,(midx-1,midy-1),(midx+1,midy+1),(255,255,255),1)
                 draw_text(output, mouse_text, 50,50)
                 
@@ -195,18 +224,40 @@ def main(args):
                 cv2.imshow('VODTool',output)
                 key = cv2.pollKey()
                 
+                STEP_SIZE = 0.1
                 if key==-1:
                     if autoplay:
                         break
                     else:
                         time.sleep(0.060)
                         continue
+                if key==ord('r'): # flip display
+                    show_img = (show_img-1)%(len(frame_db['debug'])+1)
+                    #print ('showing %s'%(show_img))
+                    continue
                 if key==ord('f'): # flip display
-                    show_delta = not show_delta
+                    show_img = (show_img+1)%(len(frame_db['debug'])+1)
+                    #print ('showing %s'%(show_img))
                     continue
                 if key==ord('k'): # play/pause
                     autoplay = not autoplay
                     continue
+                    
+                PAUSE = True
+                if key==ord('w'): # replay frame
+                    OpticFlow.YFACTOR += STEP_SIZE
+                elif key==ord('s'): # replay frame
+                    OpticFlow.YFACTOR -= STEP_SIZE
+                elif key==ord('a'): # replay frame
+                    OpticFlow.XFACTOR -= STEP_SIZE
+                elif key==ord('d'): # replay frame
+                    OpticFlow.XFACTOR += STEP_SIZE
+                else:
+                    PAUSE = False
+                if PAUSE:
+                    frame_num -= 1
+                    print ('factor=%s, %s'%(OpticFlow.XFACTOR,OpticFlow.YFACTOR))
+                    break
                 break # any other key is go next frame
             
             if key & 0xFF == ord('q'): # exit condition
