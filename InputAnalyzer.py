@@ -9,7 +9,10 @@ import cv2
 import VideoAnalysis
 import VODEvents
 import VODState
+from ImgProc import ImgEvents
 from ImgProc import Delta, BotPose # dependency for generation
+
+DEBUG=False
 
 # designed to work with the "Input Overlay" and "Mouse" OBS sources
 class InputAnalyzer(VideoAnalysis.Analyzer):
@@ -39,6 +42,8 @@ class InputAnalyzer(VideoAnalysis.Analyzer):
         
         for rule in self.detect:
             value = self.threshold(kbcrop, rule)
+            if DEBUG:
+                pub.sendMessage(ImgEvents.APPEND, key='debug', imgdata=value)
             if (value.max()>rule['active']):
                 pub.sendMessage(rule['event'], timestamp=timestamp,
                                 x=bx,y=by,)
@@ -50,7 +55,7 @@ class InputAnalyzer(VideoAnalysis.Analyzer):
 
 keyb = InputAnalyzer(region=[(83, 863),(302, 1002)], thres={
                     VODEvents.KEY_ANY_DOWN:[[-70, 110, 110], [70, 999, 999], 0.495],
-                    VODEvents.KEY_ANY_UP  :[[-90, -999, -999], [70, -110, -110], 0.495] },
+                    VODEvents.KEY_ANY_UP  :[[-90, -999, -999], [70, -90, -90], 0.395] },
                     key_size  = 55)
                     
 mous = InputAnalyzer(region=[(400, 887),(455, 953)], thres={

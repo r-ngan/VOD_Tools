@@ -14,12 +14,13 @@ from ImgProc import ImgEvents
 
 #import automatically activates the module
 #import ImgProc.Delta
-from ImgProc import OpticFlow
+#from ImgProc import OpticFlow
 #import ImgProc.BotPose
-import InputAnalyzer
-import MoveAnalyzer
-import PoseAnalyzer
 import DefaultEvRouter
+import InputAnalyzer
+import PoseAnalyzer
+import FlowAnalyzer
+import MoveAnalyzer
 from RangeStats import RangeStats
 
 mousex = 0
@@ -91,14 +92,14 @@ def frame_delay(id, topic=pub.AUTO_TOPIC, **kwargs): # at least one module reque
 
 def main(args):
     global logstream, frame_data, frame_num, frame_db, frame_wait, waiters
-    cap = cv2.VideoCapture('move_test3.mp4')
-                            #'test2023-09-15.mkv')
+    cap = cv2.VideoCapture(#'move_test2.mp4')
+                            'test.mkv')
                             #'look_test.mp4')
     if not cap.isOpened():
         print ('error opening')
         return
     
-    SKIP_FRAMES = 480 # skip VOD preamble
+    SKIP_FRAMES = 180 # skip VOD preamble
     cap.set(cv2.CAP_PROP_POS_FRAMES, SKIP_FRAMES-1)
     frame_num = SKIP_FRAMES-1
     ret, frame = cap.read()
@@ -111,18 +112,12 @@ def main(args):
     
     
     show_img = 0
-    autoplay = True
+    autoplay = False
     def breakpoint(timestamp=0, x=0, y=0):
         nonlocal autoplay
         autoplay = False
     #pub.subscribe(breakpoint, VODEvents.BOT_APPEAR) # pause at certain events
     #pub.subscribe(breakpoint, VODEvents.KEY_ANY_DOWN) # pause at certain events
-    
-    path_hist = []
-    def del_path(timestamp=0, x=0, y=0):
-        nonlocal path_hist
-        path_hist.clear()
-    pub.subscribe(del_path, VODEvents.BOT_APPEAR) # clear path at event
     
     with open('zlog.txt', 'w', buffering=1) as logfile: # line buffered
         logstream = logfile
@@ -179,9 +174,6 @@ def main(args):
                         aux_imgs= frame_db,)
             # continue # skip user interface
             
-            if 'pred_cam' in frame_db:
-                cam_params = frame_db['pred_cam']
-                path_hist.append(cam_params)
             frame_data = frame
             ''' turn flow into prediction image
             uvmap = np.indices((ydim, xdim)).astype(np.int16)
@@ -203,20 +195,26 @@ def main(args):
                 else:
                     output = np.array(frame)
                     
-                loc = np.array([midx,midy])
+                ang = np.array([0,0])
+                angscalar = np.array([xdim/FlowAnalyzer.HFOV,ydim/FlowAnalyzer.VFOV])
+                mid = np.array([midx,midy])
+
+                path_hist = MoveAnalyzer.instance.track_hist
                 for xy in path_hist[::-1]:
                     mag = np.linalg.norm(xy)
-                    MAG_LIM = 20
+                    MAG_LIM = 2.*np.pi/180
                     mag = min(MAG_LIM,mag) # cap to limit
                     color = [0,128*mag/MAG_LIM,200*mag/MAG_LIM]
                     color = tuple(int(x) for x in color)
-                    newloc = loc+xy
+                    newang = ang+xy
+                    loc = (ang)*angscalar+mid
+                    newloc = (newang)*angscalar+mid
                     x1 = int(loc[0])
                     y1 = int(loc[1])
                     x2 = int(newloc[0])
                     y2 = int(newloc[1])
-                    cv2.line(output, (x1,y1), (x2,y2), color, int(1+2.5*mag/MAG_LIM))
-                    loc = newloc
+                    cv2.line(output, (x1,y1), (x2,y2), color, int(1.5+2.*mag/MAG_LIM))
+                    ang = newang
                 #cv2.rectangle(output,(midx-1,midy-1),(midx+1,midy+1),(255,255,255),1)
                 draw_text(output, mouse_text, 50,50)
                 
@@ -245,18 +243,24 @@ def main(args):
                     
                 PAUSE = True
                 if key==ord('w'): # replay frame
-                    OpticFlow.YFACTOR += STEP_SIZE
+                    FlowAnalyzer.YFACTOR += STEP_SIZE
                 elif key==ord('s'): # replay frame
-                    OpticFlow.YFACTOR -= STEP_SIZE
+                    FlowAnalyzer.YFACTOR -= STEP_SIZE
                 elif key==ord('a'): # replay frame
-                    OpticFlow.XFACTOR -= STEP_SIZE
+                    FlowAnalyzer.XFACTOR -= STEP_SIZE
                 elif key==ord('d'): # replay frame
-                    OpticFlow.XFACTOR += STEP_SIZE
+                    FlowAnalyzer.XFACTOR += STEP_SIZE
+                elif key==ord('z'): # replay frame
+                    FlowAnalyzer.ZFACTOR -= STEP_SIZE
+                elif key==ord('x'): # replay frame
+                    FlowAnalyzer.ZFACTOR += STEP_SIZE
                 else:
                     PAUSE = False
                 if PAUSE:
                     frame_num -= 1
-                    print ('factor=%s, %s'%(OpticFlow.XFACTOR,OpticFlow.YFACTOR))
+                    print ('factor=%s, %s, %s'%(FlowAnalyzer.XFACTOR,
+                                            FlowAnalyzer.YFACTOR,
+                                            FlowAnalyzer.ZFACTOR))
                     break
                 break # any other key is go next frame
             

@@ -93,7 +93,7 @@ class BotPose(Preprocessor.Preprocessor):
             
         poses = []
         add_pose = False
-        dbg_img = aux_imgs['debug'][0] if DEBUG else None
+        dbg_img = np.array(img) if DEBUG else None
         if self.bot_track: # light update based on flow, pose check
             head_bound = self.get_headbox()
             flimg = subimage(aux_imgs['flow'], head_bound)
@@ -118,7 +118,7 @@ class BotPose(Preprocessor.Preprocessor):
                     self.refine_pose(kp_list)
                     self.last_bot_ts = timestamp
             
-            if dbg_img is not None:
+            if DEBUG:
                 cv2.rectangle(dbg_img, topleft(self.last_bound), botright(self.last_bound), color=(0,255,0), thickness=1)
                 kpx, kpy = self.last_head
                 box = (kpy-2,kpy+2,kpx-2,kpx+2)
@@ -135,8 +135,10 @@ class BotPose(Preprocessor.Preprocessor):
         if add_pose:
             mid = np.array([self.midx, self.midy])
             poses.append(self.last_head-mid)
-        
+            
         pub.sendMessage(ImgEvents.APPEND, key='poses', imgdata=poses)
+        if DEBUG:
+            pub.sendMessage(ImgEvents.APPEND, key='debug', imgdata=dbg_img)
         return True
         
     # Based on keypoints, check how confident a full body is present
@@ -325,7 +327,7 @@ class BotPose(Preprocessor.Preprocessor):
         return (mask3)#.astype(np.float32)/254. # 0 or 1 only
     
 def get_bot_pose(aux_imgs={}):
-    res = (float('nan'),float('nan'))
+    res = [float('nan'),float('nan')]
     if 'poses' in aux_imgs:
         poses = aux_imgs['poses']
         if len(poses)>0:
