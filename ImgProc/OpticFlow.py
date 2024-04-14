@@ -12,7 +12,7 @@ VIS_SIZE = 400
 VIS_SCALE = VIS_SIZE/ 80. # 80 px movement is full span
 KERN_SIZE = 15
 CLUSTERS = 5
-DOWNSCALE = 2
+DOWNSCALE = 3
 class OpticFlow(Preprocessor.Preprocessor):
 
     def initialize(self, **kwargs):
@@ -77,17 +77,23 @@ class OpticFlow(Preprocessor.Preprocessor):
             pub.sendMessage(ImgEvents.APPEND, key='moving', imgdata=[True])
         
         if moving: # only calculate optic flow if sufficient movement
+            tst = time.time_ns()
             fnext = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY),
-                                (0, 0), fx=1./DOWNSCALE, fy=1./DOWNSCALE).astype(np.int16)
+                                (0, 0), fx=1./DOWNSCALE, fy=1./DOWNSCALE)
             fprev = self.get_lastgray(lframe)
             if fprev is None:
                 fprev = cv2.resize(cv2.cvtColor(lframe, cv2.COLOR_BGR2GRAY),
-                                    (0, 0), fx=1./DOWNSCALE, fy=1./DOWNSCALE).astype(np.int16)
+                                    (0, 0), fx=1./DOWNSCALE, fy=1./DOWNSCALE)
             self.cache_lastgray(frame, fnext)
-            flow_reduce = cv2.calcOpticalFlowFarneback(fprev, fnext, None, 0.5, 6, 35, 3, 5, 1.1, cv2.OPTFLOW_FARNEBACK_GAUSSIAN)
+            flow_reduce = cv2.calcOpticalFlowFarneback(fprev, fnext, None, 
+                        pyr_scale=0.5, levels=6, winsize=25, 
+                        iterations=3, poly_n=3, poly_sigma=1.1, 
+                        flags=0)
             flow = cv2.resize(flow_reduce*DOWNSCALE, (0, 0), fx=DOWNSCALE, fy=DOWNSCALE)
+            ten = time.time_ns()
+            #print ('flow= %3.3fms'%((ten-tst)/1e6))
         else:
-            flow = np.zeros_like(frame)[...,:2]
+            flow = np.zeros_like(frame, dtype=float)[...,:2]
         
         pub.sendMessage(ImgEvents.APPEND, key='flow', imgdata=flow)
         return True

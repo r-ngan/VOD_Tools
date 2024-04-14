@@ -14,7 +14,7 @@ from ImgProc import ImgEvents
 
 #import automatically activates the module
 #import ImgProc.Delta
-#from ImgProc import OpticFlow
+#from ImgProc import OpticViz
 #import ImgProc.BotPose
 import DefaultEvRouter
 import InputAnalyzer
@@ -44,18 +44,19 @@ def get_mouse(event, x, y, flags, param):
                     x= mousex,
                     y= mousey,)
     #mouse_text = '(%d,%d)'%(x, y)
-    flow = frame_db['flow'][y,x]
-    flow2 = frame_db['flow2'][y,x]
-    value = '%7.3f %7.3f %7.3f\n%7.3f %7.3f %7.3f'%\
-            (np.linalg.norm(flow), flow[0], flow[1],
-            np.linalg.norm(flow2), flow2[0], flow2[1])
+    #flow = frame_db['flow'][y,x]
+    #flow2 = frame_db['flow2'][y,x]
+    #value = '%7.3f %7.3f %7.3f\n%7.3f %7.3f %7.3f'%\
+    #        (np.linalg.norm(flow), flow[0], flow[1],
+    #        np.linalg.norm(flow2), flow2[0], flow2[1])
+    value = '%s'%(frame_data[y,x])
     mouse_text = '%s'%(value)
 
 def draw_text(frame, text, x, y):
     font                   = cv2.FONT_HERSHEY_SIMPLEX
     bottomLeftCornerOfText = (x,y)
     fontScale              = 1
-    fontColor              = (255,255,255)
+    fontColor              = (65535,65535,65535)
     thickness              = 1
     lineType               = 2
 
@@ -93,8 +94,8 @@ def frame_delay(id, topic=pub.AUTO_TOPIC, **kwargs): # at least one module reque
 def main(args):
     global logstream, frame_data, frame_num, frame_db, frame_wait, waiters
     cap = cv2.VideoCapture(#'move_test2.mp4')
-                            'test.mkv')
-                            #'look_test.mp4')
+                            'test2023-12-24.mkv')
+                            #'look_test3.mp4')
     if not cap.isOpened():
         print ('error opening')
         return
@@ -112,7 +113,7 @@ def main(args):
     
     
     show_img = 0
-    autoplay = False
+    autoplay = True
     def breakpoint(timestamp=0, x=0, y=0):
         nonlocal autoplay
         autoplay = False
@@ -174,47 +175,15 @@ def main(args):
                         aux_imgs= frame_db,)
             # continue # skip user interface
             
-            frame_data = frame
-            ''' turn flow into prediction image
-            uvmap = np.indices((ydim, xdim)).astype(np.int16)
-            uvmap[1] -= flint[...,0]
-            uvmap[1,uvmap[1,...]<0] = 0
-            uvmap[1,uvmap[1,...]>=xdim] = 0
-            uvmap[0] -= flint[...,1]
-            uvmap[0,uvmap[0,...]<0] = 0
-            uvmap[0,uvmap[0,...]>=ydim] = 0
-            frame16 = fprev.astype(np.int16)
-            for y in range(0,ydim):
-                for x in range(0,xdim):
-                    v,u = uvmap[0, y,x], uvmap[1, y,x]
-                    dout[y,x] = frame16[v,u]#-lframe[y,x] #'''
                 
             while (1): # show frame and wait for user input
                 if show_img>0:
                     output = np.array(frame_db['debug'][show_img-1])
                 else:
                     output = np.array(frame)
+                frame_data = output
                     
-                ang = np.array([0,0])
-                angscalar = np.array([xdim/FlowAnalyzer.HFOV,ydim/FlowAnalyzer.VFOV])
-                mid = np.array([midx,midy])
-
-                path_hist = MoveAnalyzer.instance.track_hist
-                for xy in path_hist[::-1]:
-                    mag = np.linalg.norm(xy)
-                    MAG_LIM = 2.*np.pi/180
-                    mag = min(MAG_LIM,mag) # cap to limit
-                    color = [0,128*mag/MAG_LIM,200*mag/MAG_LIM]
-                    color = tuple(int(x) for x in color)
-                    newang = ang+xy
-                    loc = (ang)*angscalar+mid
-                    newloc = (newang)*angscalar+mid
-                    x1 = int(loc[0])
-                    y1 = int(loc[1])
-                    x2 = int(newloc[0])
-                    y2 = int(newloc[1])
-                    cv2.line(output, (x1,y1), (x2,y2), color, int(1.5+2.*mag/MAG_LIM))
-                    ang = newang
+                MoveAnalyzer.instance.draw_hist(output)
                 #cv2.rectangle(output,(midx-1,midy-1),(midx+1,midy+1),(255,255,255),1)
                 draw_text(output, mouse_text, 50,50)
                 
@@ -241,6 +210,7 @@ def main(args):
                     autoplay = not autoplay
                     continue
                     
+                '''
                 PAUSE = True
                 if key==ord('w'): # replay frame
                     FlowAnalyzer.YFACTOR += STEP_SIZE
@@ -261,7 +231,7 @@ def main(args):
                     print ('factor=%s, %s, %s'%(FlowAnalyzer.XFACTOR,
                                             FlowAnalyzer.YFACTOR,
                                             FlowAnalyzer.ZFACTOR))
-                    break
+                    break #'''
                 break # any other key is go next frame
             
             if key & 0xFF == ord('q'): # exit condition

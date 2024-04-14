@@ -49,6 +49,7 @@ class FlowAnalyzer(VideoAnalysis.Analyzer):
         
         self.base_ang = np.array([0,0],dtype=np.float32)
         self.delta_ang = np.array([0,0],dtype=np.float32)
+        self.mouse_xy = np.array([0,0],dtype=np.float32)
         self.moving = False
         
     def get_rot_mat(self, yaw, pitch): # roll is not used in fps
@@ -69,9 +70,9 @@ class FlowAnalyzer(VideoAnalysis.Analyzer):
             fx = self.x
         
         # delta yaw is affected by base pitch due to gimbal lock issues, so need to guess the base pitch
-        baserot = self.get_rot_mat(0*base_ang[0], base_ang[1]) # base rotation always yaw=0
+        baserot = self.get_rot_mat(0*base_ang[0], -base_ang[1]) # base rotation always yaw=0
         axis = np.matmul(baserot, self.base_axis) # align axis for later projection
-        deltarot = self.get_rot_mat(-rot_ang[0], -rot_ang[1])
+        deltarot = self.get_rot_mat(-rot_ang[0], rot_ang[1])
         TX = np.array(translate)
         
         # create screen to world map
@@ -90,17 +91,14 @@ class FlowAnalyzer(VideoAnalysis.Analyzer):
         # new x - orig x
         flow[fy,fx,0] = (proj[...,0] - self.xy_map[1,fy,fx])*self.xdim
         flow[fy,fx,1] = (proj[...,1] - self.xy_map[0,fy,fx])*self.ydim
-        return flow
+        return flow[fy,fx]
         
     def flow_loss(self, x, *args):
         bpitch, dyaw, dpitch = x
-        flow, flow2, crop = args
-
-        fx = self.x[crop]
-        fy = self.y[crop]
+        flow, flow2, fy,fx = args
         
-        flow2 = self.sim_motion(flow2, fy,fx, (0,bpitch), (dyaw,dpitch))
-        dx = (flow2[fy,fx]-flow[fy,fx])
+        simflow = self.sim_motion(flow2, fy,fx, (0,bpitch), (dyaw,dpitch))
+        dx = (simflow-flow)
         flow_mag = (np.linalg.norm(dx, axis=-1))**0.65 # squared error biases towards outliers, flatten a bit
         return flow_mag.sum()
         
@@ -124,23 +122,27 @@ class FlowAnalyzer(VideoAnalysis.Analyzer):
         flow_mag = np.linalg.norm(flow[self.y,self.x], axis=-1)
         moving = flow_mag>0.25 # filter down to reduce work on non-movement
         if moving.sum()>1000:
+            fy = self.y[moving]
+            fx = self.x[moving]
+            fy[-1] = self.midy
+            fx[-1] = self.midx
             
             # x0 = base pitch, delta yaw, delta pitch,
             bounds = [(-np.pi/2, np.pi/2),(-1, 1),(-1, 1),]
                     #(-1, 1),(-1, 1),(-1, 1),]
-            guess = np.zeros(len(bounds),dtype=np.float32)
+            guess = np.zeros(len(bounds),dtype=float)
             guess[0] = self.base_ang[1]
             guess[1] = self.delta_ang[0]
             guess[2] = self.delta_ang[1]
-            fit = optimize.minimize(self.flow_loss, method=solvers[0], x0=guess, args=(flow, flow_est, moving), bounds=bounds)
+            fit = optimize.minimize(self.flow_loss, method=solvers[0], x0=guess, args=(flow[fy,fx], flow_est, fy,fx), bounds=bounds)
             
             base_ang = (0, fit.x[0])
             delta_ang = (fit.x[1], fit.x[2])
             self.base_ang += delta_ang # dead reckoning for base angle (TODO: weigh in predicted base angle)
             
-            return fit
+            return fit, np.array(flow_est[self.midy,self.midx])
         else:
-            return None
+            return None, None
             
     def proc_frame(self, timestamp, img, aux_imgs={}):
         super().proc_frame(timestamp=timestamp, img=img, aux_imgs=aux_imgs)
@@ -156,15 +158,17 @@ class FlowAnalyzer(VideoAnalysis.Analyzer):
         flow2 = np.zeros_like(flow)
         base_ang = np.zeros(2)
         delta_ang = np.zeros(2)
+        mouse_xy = np.zeros(2)
         TX = np.zeros(3)
         fit = None
         if DEBUG:
             viz1 = np.zeros_like(frame)
             viz2 = np.zeros_like(frame)
         if self.moving: # only calculate optic flow if sufficient movement
-            fit = self.get_cam_params(flow, flow2)
+            fit, mxy = self.get_cam_params(flow, flow2)
 
             if fit is not None:
+                mouse_xy = mxy
                 base_ang = (0, fit.x[0])
                 delta_ang = np.array([fit.x[1], fit.x[2]])
                 cam_params = -delta_ang
@@ -190,6 +194,7 @@ class FlowAnalyzer(VideoAnalysis.Analyzer):
                 viz2 = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
                 
         self.delta_ang = delta_ang
+        self.mouse_xy = mouse_xy
         if DEBUG:
             # show flow arrows on debug
             YGRID = 30
