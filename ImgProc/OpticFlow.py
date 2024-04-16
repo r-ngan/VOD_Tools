@@ -33,6 +33,8 @@ class OpticFlow(Preprocessor.Preprocessor):
         hsv[self.y, self.x, 0] = ang[...,0]*180/np.pi/2
         self.hue = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR).astype(np.float32)/255.
         
+        self.flow = np.zeros([int(self.ydim//DOWNSCALE),
+                            int(self.xdim//DOWNSCALE),2], dtype=np.float32)
         
     def get_lastgray(self, img):
         if hash(img.data.tobytes()) == self.last_fprev_hash:
@@ -85,11 +87,12 @@ class OpticFlow(Preprocessor.Preprocessor):
                 fprev = cv2.resize(cv2.cvtColor(lframe, cv2.COLOR_BGR2GRAY),
                                     (0, 0), fx=1./DOWNSCALE, fy=1./DOWNSCALE)
             self.cache_lastgray(frame, fnext)
-            flow_reduce = cv2.calcOpticalFlowFarneback(fprev, fnext, None, 
+            self.flow = cv2.calcOpticalFlowFarneback(fprev, fnext, self.flow, 
                         pyr_scale=0.5, levels=6, winsize=25, 
                         iterations=3, poly_n=3, poly_sigma=1.1, 
-                        flags=0)
-            flow = cv2.resize(flow_reduce*DOWNSCALE, (0, 0), fx=DOWNSCALE, fy=DOWNSCALE)
+                        flags=cv2.OPTFLOW_USE_INITIAL_FLOW )
+            
+            flow = cv2.resize(self.flow*DOWNSCALE, (0, 0), fx=DOWNSCALE, fy=DOWNSCALE)
             ten = time.time_ns()
             #print ('flow= %3.3fms'%((ten-tst)/1e6))
         else:

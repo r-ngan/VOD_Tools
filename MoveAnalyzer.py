@@ -53,7 +53,6 @@ class MoveAnalyzer(FlowAnalyzer.FlowAnalyzer):
                 dts = timestamp - self.ts_moving
             
                 if not self.fsm_inmotion: # start to move
-                    print ('start')
                     pub.sendMessage(VODEvents.MOUSE_MOVE_START, timestamp=timestamp,
                                     x=bx,y=by,)
                     self.fsm_inmotion = True
@@ -62,7 +61,6 @@ class MoveAnalyzer(FlowAnalyzer.FlowAnalyzer):
             dts = timestamp - self.ts_static
             dtm = timestamp - self.ts_moving
             if self.fsm_inmotion and dtm>2: # stopped move
-                print ('stopped')
                 pub.sendMessage(VODEvents.MOUSE_MOVE_END, timestamp=timestamp,
                                 x=bx,y=by,)
                 self.fsm_inmotion = False

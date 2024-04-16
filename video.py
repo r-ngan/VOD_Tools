@@ -23,6 +23,8 @@ import FlowAnalyzer
 import MoveAnalyzer
 from RangeStats import RangeStats
 
+BATCH = True # batch mode don't print on screen
+
 mousex = 0
 mousey = 0
 mouse_text = ''
@@ -80,7 +82,8 @@ def dbg_event(topic=pub.AUTO_TOPIC, **kwargs):
 def frame_append(key, imgdata, topic=pub.AUTO_TOPIC, **kwargs):
     global frame_db
     if key=='debug':
-        frame_db[key].append(imgdata)
+        if not BATCH:
+            frame_db[key].append(imgdata)
     else:
         if key in frame_db:
             print ('!warning: %s already in frame db'%(key))
@@ -95,7 +98,7 @@ def main(args):
     global logstream, frame_data, frame_num, frame_db, frame_wait, waiters
     cap = cv2.VideoCapture(#'move_test2.mp4')
                             'test2023-12-24.mkv')
-                            #'look_test3.mp4')
+                            #'look_test.mp4')
     if not cap.isOpened():
         print ('error opening')
         return
@@ -114,11 +117,14 @@ def main(args):
     
     show_img = 0
     autoplay = True
-    def breakpoint(timestamp=0, x=0, y=0):
-        nonlocal autoplay
-        autoplay = False
-    #pub.subscribe(breakpoint, VODEvents.BOT_APPEAR) # pause at certain events
-    #pub.subscribe(breakpoint, VODEvents.KEY_ANY_DOWN) # pause at certain events
+    if not BATCH:
+        def breakpoint(timestamp=0, x=0, y=0):
+            nonlocal autoplay
+            autoplay = False
+        #pub.subscribe(breakpoint, VODEvents.BOT_APPEAR) # pause at certain events
+        #pub.subscribe(breakpoint, VODEvents.KEY_ANY_DOWN) # pause at certain events
+    else:
+        autoplay = True
     
     with open('zlog.txt', 'w', buffering=1) as logfile: # line buffered
         logstream = logfile
@@ -131,9 +137,12 @@ def main(args):
                         depth= depth,
                         frame_rate= frate,) # initialize all modules
         
-        cv2.namedWindow('VODTool')
-        cv2.setMouseCallback('VODTool', get_mouse)
+        if not BATCH:
+            cv2.namedWindow('VODTool')
+            cv2.setMouseCallback('VODTool', get_mouse)
         PAUSE = False
+        
+        vidst = time.time_ns()
         while(cap.isOpened()):
             if not PAUSE:
                 lframe = frame
@@ -145,6 +154,9 @@ def main(args):
             frame_num += 1
             if frame_num < SKIP_FRAMES:
                 continue
+            if (frame_num%frate)==0:
+                perc = frame_num / frames_total * 100.
+                print ('%5.1f%% done. timestamp= %4.1f s'%(perc, cap.get(cv2.CAP_PROP_POS_MSEC)/1000))
                 
             # reset frame db
             frame_db.clear()
@@ -152,6 +164,8 @@ def main(args):
             frame_db['last'] = lframe
             frame_db['debug'] = []
             
+            
+            tst = time.time_ns()
             frame_wait = True
             while (frame_wait): # preprocessors can request wait if out of order due to pubsub, forms a DAG of processing
                 frame_wait = False
@@ -167,13 +181,20 @@ def main(args):
                         print ('preprocess done, some modules failed: %s'%(waiters))
                         break
             pub.sendMessage(ImgEvents.DONE) # preprocessing is done, clean up
+            ten = time.time_ns()
+            #print ('img proc= %3.3fms'%((ten-tst)/1e6))
             
+            tst = time.time_ns()
             # all preprocessors done, go to analysis
             pub.sendMessage(VODEvents.VOD_FRAME,
                         timestamp= frame_num,
                         img= frame,
                         aux_imgs= frame_db,)
-            # continue # skip user interface
+            ten = time.time_ns()
+            #print ('analysis= %3.3fms'%((ten-tst)/1e6))
+            
+            if BATCH:
+                continue # skip user interface
             
                 
             while (1): # show frame and wait for user input
@@ -236,6 +257,12 @@ def main(args):
             
             if key & 0xFF == ord('q'): # exit condition
                 break
+                
+        viden = time.time_ns()
+        avg_time = (viden-vidst)/(frame_num-SKIP_FRAMES)
+        print ('time elapsed = %3.3fs'%((viden-vidst)/1e9))
+        print ('avg per frame = %3.3fms'%(avg_time/1e6))
+        
         print ('%s'%(RangeStats.datastore), file=logstream)
     print ('total trials = %d'%(RangeStats.trial_count))
     RangeStats.summarize()

@@ -3,6 +3,7 @@ import time
 from pubsub import pub
 import numpy as np
 import cv2
+import torch
 from scipy import optimize
 from scipy.special import huber
 
@@ -29,23 +30,26 @@ class FlowAnalyzer(VideoAnalysis.Analyzer):
         super().initialize(**kwargs)
                 
         # subsample to increase speed
-        XSTEP = 35
-        YSTEP = 20
-        self.y,self.x = np.mgrid[YSTEP/2:self.ydim:YSTEP, XSTEP/2:self.xdim:XSTEP]. \
+        XSTEP = 45
+        YSTEP = 25
+        TRIM_Y1 = 90
+        TRIM_Y2 = 90
+        self.y,self.x = np.mgrid[TRIM_Y1+YSTEP/2:self.ydim-TRIM_Y2:YSTEP, XSTEP/2:self.xdim:XSTEP]. \
                         reshape(2,-1).astype(int)
-        
-        self.xy_map = np.mgrid[0:self.ydim, 0:self.xdim].astype(np.float32)
+        self.xy_map = np.mgrid[0:self.ydim, 0:self.xdim].astype(float)
+        self.allfy, self.allfx = self.xy_map.reshape(2,-1).astype(int)
         self.xy_map[0,:] -= self.midy
         self.xy_map[1,:] -= self.midx
         self.xy_map /= self.ydim # normalize to 0.5 = half height
         self.xy_map[1,:] *= ASPECT
+        self.tensxy = torch.stack([torch.tensor(self.xy_map[1]), torch.tensor(self.xy_map[0])],dim=-1)
                             
-        self.base_axis = np.array([[1,0,0],[0,1,0],[0,0,1]]).T
+        self.base_axis = torch.tensor([[1,0,0],[0,1,0],[0,0,1]], dtype=float).T
         # projection scalars
         tanfovx = 2*np.tan(HFOV/2)
         tanfovy = 2*np.tan(VFOV/2)
-        self.fov = np.array([tanfovx,tanfovy,1])
-        self.rand = (np.random.rand(self.ydim, self.xdim)*40+15) # "fixed" random Z-data
+        self.fov = torch.tensor([tanfovx,tanfovy,1])
+        self.rand = np.random.rand(self.ydim, self.xdim)*40+15 # "fixed" random Z-data
         
         self.base_ang = np.array([0,0],dtype=np.float32)
         self.delta_ang = np.array([0,0],dtype=np.float32)
@@ -53,58 +57,61 @@ class FlowAnalyzer(VideoAnalysis.Analyzer):
         self.moving = False
         
     def get_rot_mat(self, yaw, pitch): # roll is not used in fps
-        ymat = np.array([[np.cos(yaw),0,np.sin(yaw)],
-                        [0,1,0],
-                        [-np.sin(yaw),0,np.cos(yaw)],])
-        pmat = np.array([[1,0,0],
-                        [0,np.cos(pitch),-np.sin(pitch)],
-                        [0,np.sin(pitch),np.cos(pitch)],])
-        return np.matmul(ymat,pmat)
+        t0 = torch.tensor(0., dtype=float)
+        t1 = torch.tensor(1., dtype=float)
+        cy = torch.cos(yaw)
+        sy = torch.sin(yaw)
+        cp = torch.cos(pitch)
+        sp = torch.sin(pitch)
+        ymat = torch.stack([torch.stack([cy,t0,sy]),
+                        torch.stack([t0,t1,t0]),
+                        torch.stack([-sy,t0,cy])])
+        pmat = torch.stack([torch.stack([t1,t0,t0]),
+                        torch.stack([t0,cp,-sp]),
+                        torch.stack([t0,sp,cp]),])
+        return ymat @ pmat
         
     # simulate the motion we would see with known angles / translations
     # Use this as basis for optimizer
-    def sim_motion(self, flow, fy=None, fx=None, base_ang=(0,0), rot_ang=(0,0), translate=[0,0,0]):
-        if fy is None:
-            fy = self.y
-        if fx is None:
-            fx = self.x
+    def sim_motion(self, Z, XY, base_ang=(torch.tensor(0.),torch.tensor(0.)), rot_ang=(torch.tensor(0.),torch.tensor(0.)), translate=[0,0,0]):
         
         # delta yaw is affected by base pitch due to gimbal lock issues, so need to guess the base pitch
         baserot = self.get_rot_mat(0*base_ang[0], -base_ang[1]) # base rotation always yaw=0
-        axis = np.matmul(baserot, self.base_axis) # align axis for later projection
+        axis = baserot @ self.base_axis # align axis for later projection
         deltarot = self.get_rot_mat(-rot_ang[0], rot_ang[1])
-        TX = np.array(translate)
+        TX = torch.tensor(translate)
         
         # create screen to world map
-        Z = self.rand[fy,fx] # use random depth to fit translation
-        X = Z*self.xy_map[1,fy,fx] # X = x*Z
-        Y = Z*self.xy_map[0,fy,fx]
-        
-        pts = np.stack((X,Y,Z),axis=-1).reshape(-1,3)*self.fov # flatten vector
-        pts = np.matmul(baserot, pts.T)
+        pad = torch.ones(XY.shape[0], 1) 
+        pts = torch.cat((XY,pad),1) # X = x*Z
+        pts = pts * Z[:, None] * self.fov
+        pts = baserot @ (pts.T)
 
-        new_pts = np.matmul(deltarot, pts).T + TX # turn back to (...,3) for inner product
-        proj = np.inner(new_pts, axis.T).reshape(-1,3)
-        proj = proj/proj[..., 2:]/self.fov # UVW/W
+        new_pts = (deltarot @ pts).T + TX # turn back to (...,3) for inner product
+        proj = torch.inner(new_pts, axis.T)
+        proj = proj/proj[..., 2:] / self.fov # UVW/W
         
         # delta flow in screen space
         # new x - orig x
-        flow[fy,fx,0] = (proj[...,0] - self.xy_map[1,fy,fx])*self.xdim
-        flow[fy,fx,1] = (proj[...,1] - self.xy_map[0,fy,fx])*self.ydim
-        return flow[fy,fx]
+        scr_scale = torch.tensor([self.xdim, self.ydim])
+        flow = (proj[:,:2]-XY)*scr_scale
+        
+        return flow
         
     def flow_loss(self, x, *args):
+        x = torch.tensor(x, requires_grad=True)
         bpitch, dyaw, dpitch = x
-        flow, flow2, fy,fx = args
+        byaw = torch.tensor(0.)
+        flow, Z, XY = args
         
-        simflow = self.sim_motion(flow2, fy,fx, (0,bpitch), (dyaw,dpitch))
+        simflow = self.sim_motion(Z, XY, (byaw,bpitch), (dyaw,dpitch))
         dx = (simflow-flow)
-        flow_mag = (np.linalg.norm(dx, axis=-1))**0.65 # squared error biases towards outliers, flatten a bit
-        return flow_mag.sum()
+        flow_mag = (torch.norm(dx, dim=-1))**0.65 # squared error biases towards outliers, flatten a bit
+        result = flow_mag.sum()
+        result.backward()
+        return result.detach(), x.grad
         
     def get_cam_params(self, flow, flow_est=None):
-        if flow_est is None:
-            flow_est = np.zeros_like(flow)
         solvers = ['Nelder-Mead',
             'Powell',
             'CG',
@@ -134,13 +141,19 @@ class FlowAnalyzer(VideoAnalysis.Analyzer):
             guess[0] = self.base_ang[1]
             guess[1] = self.delta_ang[0]
             guess[2] = self.delta_ang[1]
-            fit = optimize.minimize(self.flow_loss, method=solvers[0], x0=guess, args=(flow[fy,fx], flow_est, fy,fx), bounds=bounds)
+            
+            inflow = torch.tensor(flow[fy,fx])
+            Z = torch.tensor(self.rand[fy,fx])
+            XY = self.tensxy[fy,fx]
+            fit = optimize.minimize(self.flow_loss, method=solvers[5], 
+                                    x0=guess, args=(inflow, Z, XY),
+                                    jac=True, bounds=bounds)
             
             base_ang = (0, fit.x[0])
             delta_ang = (fit.x[1], fit.x[2])
             self.base_ang += delta_ang # dead reckoning for base angle (TODO: weigh in predicted base angle)
             
-            return fit, np.array(flow_est[self.midy,self.midx])
+            return fit, np.array([0,0])
         else:
             return None, None
             
@@ -165,7 +178,10 @@ class FlowAnalyzer(VideoAnalysis.Analyzer):
             viz1 = np.zeros_like(frame)
             viz2 = np.zeros_like(frame)
         if self.moving: # only calculate optic flow if sufficient movement
+            tst = time.time_ns()
             fit, mxy = self.get_cam_params(flow, flow2)
+            ten = time.time_ns()
+            #print ('cam_params= %3.3fms'%((ten-tst)/1e6))
 
             if fit is not None:
                 mouse_xy = mxy
@@ -182,8 +198,12 @@ class FlowAnalyzer(VideoAnalysis.Analyzer):
                 hsv[..., 2] = np.clip(np.sqrt(mag)*40,0,255)
                 viz1 = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
                 
-                fy,fx = np.mgrid[0:self.ydim, 0:self.xdim].reshape(2,-1).astype(int)
-                self.sim_motion(flow2, fy, fx, base_ang, delta_ang, TX)
+                bang = torch.tensor(base_ang)
+                dang = torch.tensor(delta_ang)
+                Z = torch.tensor(self.rand[self.allfy,self.allfx])
+                XY = self.tensxy[self.allfy,self.allfx]
+                flow2 = self.sim_motion(Z, XY, bang, dang, TX).reshape(self.ydim, self.xdim, 2)
+                flow2 = flow2.data.cpu().numpy()
                 
                 flow2[self.midy+200:,::2] = 0 # crop some symmetry away for better visualization
                 mag, ang = cv2.cartToPolar(flow2[..., 0], flow2[..., 1])

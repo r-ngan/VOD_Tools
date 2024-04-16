@@ -3,6 +3,7 @@ import time
 from pubsub import pub
 import numpy as np
 import cv2
+import torch
 from ultralytics import YOLO
 
 from ImgProc import ImgEvents, Preprocessor
@@ -29,6 +30,8 @@ class BotPose(Preprocessor.Preprocessor):
     
     def initialize(self, **kwargs):
         super().initialize(**kwargs)
+        if torch.cuda.is_available():
+            torch.cuda.set_device(0)
         self.qmodel = YOLO('assets/yolov8m.pt')
         YOLO_KERNEL=32
         DOWNSCALE=2.
@@ -45,6 +48,7 @@ class BotPose(Preprocessor.Preprocessor):
         self.last_head = (0,0)
         self.bot_track = False
         self.last_bot_ts = 0
+        self.first_search = True
         
     def update_track(self, motion):
         y,y2,x,x2 = self.last_bound
@@ -55,7 +59,7 @@ class BotPose(Preprocessor.Preprocessor):
         
     def pin_head(self, pose):
         # don't rely on face kps, use shoulders and extrapolate a triangle is more stable
-        shoulders = pose[5:7]
+        shoulders = pose[5:7].cpu()
         base = self.get_weighted_avg(shoulders)
         base_dist = math.dist(shoulders[0][:-1], shoulders[1][:-1])
         headxy = np.array([base[0], base[1]-base_dist*0.6])
@@ -86,11 +90,20 @@ class BotPose(Preprocessor.Preprocessor):
         x2 = min(self.xdim,self.last_head[0]+PXE)
         y2 = min(self.ydim,self.last_head[1]+PXE_DOWN)
         return [y1,y2,x1,x2]
+        
+    def get_changed_regions(self, delta):
+        KERN_SIZE = 15
+        motion = np.sum(delta, axis=-1)>55
+        frame = np.zeros_like(delta, dtype=float)
+        frame[motion] = 1
+        frame = cv2.GaussianBlur(frame, (KERN_SIZE, KERN_SIZE), 1.)
+        return None
 
     def proc_frame(self, timestamp, img, aux_imgs={}):
-        if not self.check_requirements(aux_imgs, ['base', 'last', 'flow']):
+        if not self.check_requirements(aux_imgs, ['flow', 'abs_delta']):
             return False
-            
+        delta = aux_imgs['abs_delta']
+        
         poses = []
         add_pose = False
         dbg_img = np.array(img) if DEBUG else None
@@ -125,12 +138,17 @@ class BotPose(Preprocessor.Preprocessor):
                 cv2.rectangle(dbg_img, topleft(box), botright(box), color=(0,255,0), thickness=1)
         
         else: # full screen search
+            if not self.first_search:
+                # process delta information
+                regions = self.get_changed_regions(delta)
             bots = self.findbot(img, debug=dbg_img)
+            self.first_search = False
             if len(bots)>0:
                 self.last_bot_ts = timestamp
                 self.last_head = bots[0]['head']
                 self.last_bound = bots[0]['bound']
                 self.bot_track = True
+                self.first_search = True # when it come back after tracking, do full scan
                 add_pose = True
         if add_pose:
             mid = np.array([self.midx, self.midy])
@@ -154,7 +172,7 @@ class BotPose(Preprocessor.Preprocessor):
     # Based on keypoints, check how confident chest is good
     def get_chest_conf(self, kp_list):
         chest_ix = [5,6,11,12]
-        chest = kp_list[chest_ix]
+        chest = kp_list[chest_ix].cpu()
         # pretend chest is axis-aligned bounding box (need to account rotate/warp later)
         chest_min = chest.min(axis=0).values
         chest_max = chest.max(axis=0).values
@@ -189,6 +207,7 @@ class BotPose(Preprocessor.Preprocessor):
             if kp_list is None:
                 continue
                 
+            tst = time.time_ns()
             headxy = self.pin_head(kp_list)
             kpx, kpy = headxy
             if debug is not None:
@@ -199,6 +218,8 @@ class BotPose(Preprocessor.Preprocessor):
             results.append({
                     'head' :headxy,
                     'bound':b, })
+            ten = time.time_ns()
+            #print ('aux findbot= %3.3fms'%((ten-tst)/1e6))
         return results
         
     # function with (x=50 y=2.5), (x=80 y=2), (x=140 y=1.5)
@@ -209,6 +230,7 @@ class BotPose(Preprocessor.Preprocessor):
         return scale
         
     def pose_findbot(self, img, img_offset=[0,0,0,0]):
+        tst = time.time_ns()
         SCALE = self.pose_scale(img) # zoom in if far away
         #print (img.shape)
         #print (SCALE)
@@ -221,6 +243,9 @@ class BotPose(Preprocessor.Preprocessor):
                         imgsz=tuple(imgsz), 
                         classes=self.filtcls,
                         stream=False, verbose=False)[0]
+                        
+        ten = time.time_ns()
+        #print ('pose findbot= %3.3fms'%((ten-tst)/1e6))
         if pose.keypoints is None:
             return None, None
         kp_list = pose.keypoints.data[0]/SCALE # beware that confidence is SCALED also
@@ -238,6 +263,8 @@ class BotPose(Preprocessor.Preprocessor):
         MIN_ASPECT = 1.2 # H should be larger than W
         TRIM_Y1 = 90
         TRIM_Y2 = 90
+        
+        tst = time.time_ns()
         enlarge = cv2.resize(img[TRIM_Y1:-TRIM_Y2,...], (0, 0), fx=SCALE, fy=SCALE)
         res = self.qmodel.predict(enlarge,
                         conf=0.02, iou=0.3,
@@ -246,8 +273,11 @@ class BotPose(Preprocessor.Preprocessor):
                         stream=False, verbose=False)[0]
                         
         boxes = res.boxes.xywh/SCALE
+        
+        ten = time.time_ns()
+        #print ('coarse findbot= %3.3fms'%((ten-tst)/1e6))
         for box in boxes:
-            x, y, w, h = box # detect box is centered x,y
+            x, y, w, h = box.cpu() # detect box is centered x,y
             if w>MAX_X or h>MAX_Y or h/w<MIN_ASPECT: # don't process boxes too big
              continue
             PXE = 10 # border expansion to capture more context
