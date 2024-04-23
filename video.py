@@ -1,4 +1,5 @@
 import math
+import argparse
 import sys
 import time
 import traceback
@@ -23,7 +24,7 @@ import FlowAnalyzer
 import MoveAnalyzer
 from RangeStats import RangeStats
 
-BATCH = True # batch mode don't print on screen
+BATCH = False # batch mode don't print on screen
 
 mousex = 0
 mousey = 0
@@ -96,14 +97,26 @@ def frame_delay(id, topic=pub.AUTO_TOPIC, **kwargs): # at least one module reque
 
 def main(args):
     global logstream, frame_data, frame_num, frame_db, frame_wait, waiters
-    cap = cv2.VideoCapture(#'move_test2.mp4')
-                            'test2023-12-24.mkv')
-                            #'look_test.mp4')
+    
+    argp = argparse.ArgumentParser(description='VOD review tool')
+    argp.add_argument('source', nargs='?', default='test.mkv', 
+                    help='video source path')
+    argp.add_argument('--skip', type=int, nargs='?', default=180,
+                    help='start at offset frames into video')
+    argp.add_argument('-m', '--manual', action='store_false',
+                    help='turn off autoplay')
+    argp.add_argument('-d', '--dump', nargs='?', const='dump.mp4', default=None,
+                    help='dump out debug frame to video file')
+    params = argp.parse_args(args)
+    
+    cap = cv2.VideoCapture(params.source)
     if not cap.isOpened():
         print ('error opening')
         return
     
-    SKIP_FRAMES = 180 # skip VOD preamble
+    SKIP_FRAMES = params.skip # skip VOD preamble
+    # 23-09-15 tricky bot appear: 1440, 2590
+    # 23-12-24 tricky bot appear: 811, 1433
     cap.set(cv2.CAP_PROP_POS_FRAMES, SKIP_FRAMES-1)
     frame_num = SKIP_FRAMES-1
     ret, frame = cap.read()
@@ -116,7 +129,7 @@ def main(args):
     
     
     show_img = 0
-    autoplay = True
+    autoplay = params.manual
     if not BATCH:
         def breakpoint(timestamp=0, x=0, y=0):
             nonlocal autoplay
@@ -125,6 +138,12 @@ def main(args):
         #pub.subscribe(breakpoint, VODEvents.KEY_ANY_DOWN) # pause at certain events
     else:
         autoplay = True
+        
+    DUMP_DBG = params.dump
+    vidout = None
+    if DUMP_DBG is not None:
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        vidout = cv2.VideoWriter(DUMP_DBG, fourcc, frate, (xdim, ydim))
     
     with open('zlog.txt', 'w', buffering=1) as logfile: # line buffered
         logstream = logfile
@@ -193,6 +212,10 @@ def main(args):
             ten = time.time_ns()
             #print ('analysis= %3.3fms'%((ten-tst)/1e6))
             
+            if vidout is not None:
+                dbg_out = frame_db['debug'][0]
+                draw_text(dbg_out, '%d'%(frame_num), 1800,50)
+                vidout.write(dbg_out)
             if BATCH:
                 continue # skip user interface
             
@@ -204,7 +227,7 @@ def main(args):
                     output = np.array(frame)
                 frame_data = output
                     
-                MoveAnalyzer.instance.draw_hist(output)
+                #MoveAnalyzer.instance.draw_hist(output)
                 #cv2.rectangle(output,(midx-1,midy-1),(midx+1,midy+1),(255,255,255),1)
                 draw_text(output, mouse_text, 50,50)
                 
@@ -266,6 +289,9 @@ def main(args):
         print ('%s'%(RangeStats.datastore), file=logstream)
     print ('total trials = %d'%(RangeStats.trial_count))
     RangeStats.summarize()
+    
+    if vidout is not None:
+        vidout.release()
     #with open('zz2.csv', 'w') as dumpfile:
     #    for x in InputAnalyzer.key_data:
     #        dumpfile.write('%s\n'%(x))

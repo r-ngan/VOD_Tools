@@ -9,7 +9,7 @@ from ultralytics import YOLO
 from ImgProc import ImgEvents, Preprocessor
 from ImgProc import Delta, OpticFlow # dependency for generation
 
-DEBUG=False
+DEBUG=True
 
 # find location of bots and presents them for analyzers to use
 # Theory of operation:
@@ -25,30 +25,58 @@ DEBUG=False
 #
 # Sometimes pose fitting will fail. Allow dead reckoning for a while until get a good lock
 # Each time pose fit succeeds, use head position to improve tracking
-BOT_TIMEOUT = 20
+BOT_TIMEOUT = 10
 class BotPose(Preprocessor.Preprocessor):
     
     def initialize(self, **kwargs):
         super().initialize(**kwargs)
         if torch.cuda.is_available():
             torch.cuda.set_device(0)
-        self.qmodel = YOLO('assets/yolov8m.pt')
+        self.qmodel = YOLO('assets/valbotm.pt')
         YOLO_KERNEL=32
         DOWNSCALE=2.
         self.qdim = (((self.ydim/DOWNSCALE)//YOLO_KERNEL) * YOLO_KERNEL,
                     ((self.xdim/DOWNSCALE)//YOLO_KERNEL) * YOLO_KERNEL,)
-        self.finemodel = YOLO('assets/yolov8m-pose.pt')
-        self.finedim = ((self.ydim//YOLO_KERNEL) * YOLO_KERNEL,
-                        (self.xdim//YOLO_KERNEL) * YOLO_KERNEL,)
+        self.finemodel = YOLO('assets/valbots320-pose.pt')
+        self.finedim = 320#((self.ydim//YOLO_KERNEL) * YOLO_KERNEL,
+                       # (self.xdim//YOLO_KERNEL) * YOLO_KERNEL,)
         self.filtcls = []
         for ix, cls in self.qmodel.names.items():
-            if cls=='person':
+            if cls in ['person']:
                 self.filtcls.append(ix)
         self.last_bound = (0,0,0,0)
-        self.last_head = (0,0)
+        self.last_head = (0,0,0)
+        self.last_pose = None
         self.bot_track = False
         self.last_bot_ts = 0
         self.first_search = True
+        
+    def get_bound_xywh(self):
+        y1,y2,x1,x2 = self.last_bound
+        w = (x2-x1)/self.xdim
+        h = (y2-y1)/self.ydim
+        x = (x2+x1)/2/self.xdim
+        y = (y2+y1)/2/self.ydim
+        return x,y,w,h
+        
+    def get_head_xywh(self):
+        x1,y1,size = self.last_head
+        w = (2*size)/self.xdim
+        h = (2*size)/self.ydim
+        x = x1/self.xdim
+        y = y1/self.ydim
+        return x,y,w,h
+        
+    def get_pose_data(self):
+        kp_list = self.last_pose.cpu().numpy()
+        res = []
+        for x1,y1,conf in kp_list:
+            x = x1/self.xdim
+            y = y1/self.ydim
+            conf = 1. if conf>0.8 else 0.
+            res.extend([x,y,conf])
+        return res
+        
         
     def update_track(self, motion):
         y,y2,x,x2 = self.last_bound
@@ -62,11 +90,26 @@ class BotPose(Preprocessor.Preprocessor):
         shoulders = pose[5:7].cpu()
         base = self.get_weighted_avg(shoulders)
         base_dist = math.dist(shoulders[0][:-1], shoulders[1][:-1])
-        headxy = np.array([base[0], base[1]-base_dist*0.6])
+        headsize = base_dist*0.4 # head is half width of shoulder
+        headxy = np.array([base[0], base[1]-base_dist*0.6, headsize])
+        #head = pose[:1].cpu()
+        #headpos = self.get_weighted_avg(head)
+        #headxy = np.array([headpos[0], headpos[1], headsize])
+        return headxy
+        
+    def pin_head2(self, pose): # pure pose estimator
+        # use shoulders for head size
+        shoulders = pose[5:7].cpu()
+        base = self.get_weighted_avg(shoulders)
+        base_dist = math.dist(shoulders[0][:-1], shoulders[1][:-1])
+        headsize = base_dist*0.4 # head is proportion of shoulder
+        
+        head = pose[0].cpu()
+        headxy = np.array([head[0], head[1], headsize])
         return headxy
         
     def refine_pose(self, pose):
-        ALPHA = 0.1
+        ALPHA = 0.2
         cconf, cbox = self.get_chest_conf(pose)
         robust = cconf>0.9
         if robust:
@@ -78,8 +121,8 @@ class BotPose(Preprocessor.Preprocessor):
             cbox[2] = max(0,cbox[2]-1.5*w)
             cbox[3] = min(self.xdim,cbox[3]+1.5*w)
             self.last_bound = self.last_bound*(1-ALPHA) + cbox*(ALPHA)
-        headxy = self.pin_head(pose)
-        self.last_head = self.last_head*(1-ALPHA) + headxy*(ALPHA)
+            headxy = self.pin_head(pose)
+            self.last_head = self.last_head*(1-ALPHA) + headxy*(ALPHA)
         
     # use a small region around the head for flow tracking
     def get_headbox(self):
@@ -117,57 +160,69 @@ class BotPose(Preprocessor.Preprocessor):
             #    print ('%s:%s'%(timestamp,mvar))
             
             add_pose = True
+            kp_list = None
             if timestamp - self.last_bot_ts > BOT_TIMEOUT: # bot is probably gone
                 self.bot_track = False
                 add_pose = False
             elif motion_reliable: # only track if the motion is stable
                 self.update_track(motion)
-                self.last_head += motion
+                self.last_head[:2] += motion
                 
-                newsubimg = subimage(img, self.last_bound) # bound after update
-                kp_list, kp_conf = self.pose_findbot(newsubimg, self.last_bound)
+                all_bound = np.array([0,self.ydim,0,self.xdim])
+                #newsubimg = subimage(img, all_bound) # bound after update
+                kp_list, kp_conf = self.pose_findbot(img, all_bound)
                 #print ('conf=%s'%(kp_conf))
                 if kp_list is not None: # bot still present
+                    self.last_pose = kp_list
                     self.refine_pose(kp_list)
                     self.last_bot_ts = timestamp
             
             if DEBUG:
                 cv2.rectangle(dbg_img, topleft(self.last_bound), botright(self.last_bound), color=(0,255,0), thickness=1)
-                kpx, kpy = self.last_head
-                box = (kpy-2,kpy+2,kpx-2,kpx+2)
-                cv2.rectangle(dbg_img, topleft(box), botright(box), color=(0,255,0), thickness=1)
+                #if kp_list is not None:
+                #    self.draw_keypoints(dbg_img, kp_list)
+                self.draw_keypoints(dbg_img, self.last_pose)
+                kpx, kpy, headsize = self.last_head
+                circ = (kpy,kpy,kpx,kpx)
+                cv2.circle(dbg_img, topleft(circ), int(headsize), color=(0,255,0), thickness=1)
         
         else: # full screen search
             if not self.first_search:
                 # process delta information
                 regions = self.get_changed_regions(delta)
-            bots = self.findbot(img, debug=dbg_img)
+            #bots = self.findbot(img, debug=dbg_img)
+            bots = self.findbot2(img, debug=dbg_img)
+            self.bots = bots
             self.first_search = False
             if len(bots)>0:
                 self.last_bot_ts = timestamp
                 self.last_head = bots[0]['head']
                 self.last_bound = bots[0]['bound']
+                self.last_pose = bots[0]['pose']
                 self.bot_track = True
-                self.first_search = True # when it come back after tracking, do full scan
+                #self.first_search = True # when it come back after tracking, do full scan
                 add_pose = True
         if add_pose:
             mid = np.array([self.midx, self.midy])
-            poses.append(self.last_head-mid)
+            poses.append(self.last_head[:2]-mid)
             
         pub.sendMessage(ImgEvents.APPEND, key='poses', imgdata=poses)
         if DEBUG:
             pub.sendMessage(ImgEvents.APPEND, key='debug', imgdata=dbg_img)
+            pub.sendMessage(ImgEvents.APPEND, key='debug', imgdata=aux_imgs['last'])
         return True
         
     # Based on keypoints, check how confident a full body is present
     def get_body_conf(self, kp_list):
         # items are [x,y,confidence]
+        sub_ix = [0,5,6,11,12]
+        sub_list = [x for ix, x in enumerate(kp_list) if ix in sub_ix]
         IX_X = 0
         IX_Y = 1
         IX_CONF = 2
         if len(kp_list)<1: # no key points
             return 0
-        return sum([it[IX_CONF] for it in kp_list]) / len(kp_list)
+        return sum([it[IX_CONF] for it in sub_list]) / len(sub_list)
         
     # Based on keypoints, check how confident chest is good
     def get_chest_conf(self, kp_list):
@@ -209,15 +264,16 @@ class BotPose(Preprocessor.Preprocessor):
                 
             tst = time.time_ns()
             headxy = self.pin_head(kp_list)
-            kpx, kpy = headxy
+            kpx, kpy, headsize = headxy
             if debug is not None:
                 self.draw_keypoints(debug, kp_list)
-                box = (kpy-2,kpy+2,kpx-2,kpx+2)
-                cv2.rectangle(debug, topleft(box), botright(box), color=(255,0,0), thickness=1)
+                circ = (kpy,kpy,kpx,kpx)
+                cv2.circle(debug, topleft(circ), int(headsize), color=(255,0,0), thickness=1)
                 
             results.append({
                     'head' :headxy,
-                    'bound':b, })
+                    'bound':b,
+                    'pose' :kp_list})
             ten = time.time_ns()
             #print ('aux findbot= %3.3fms'%((ten-tst)/1e6))
         return results
@@ -229,20 +285,58 @@ class BotPose(Preprocessor.Preprocessor):
         scale = round(scale*2)/2. # allow half steps only
         return scale
         
-    def pose_findbot(self, img, img_offset=[0,0,0,0]):
+    def findbot2(self, img, debug=None):
+        results = []
         tst = time.time_ns()
-        SCALE = self.pose_scale(img) # zoom in if far away
-        #print (img.shape)
-        #print (SCALE)
-        enlarge = cv2.resize(img, (0, 0), fx=SCALE, fy=SCALE)
-        imgsz = np.array(enlarge.shape[:2])
-        YOLO_STRIDE = 32
-        imgsz = ((imgsz+YOLO_STRIDE-1)//YOLO_STRIDE)*YOLO_STRIDE # YOLO needs multiple of 32
-        pose = self.finemodel.predict(enlarge,
-                        conf=0.22,
-                        imgsz=tuple(imgsz), 
+        SCALE = 1#self.pose_scale(img) # zoom in if far away
+        #enlarge = cv2.resize(img, (0, 0), fx=SCALE, fy=SCALE)
+        res = self.finemodel.predict(img,
+                        conf=0.5,
+                        imgsz=self.finedim, 
                         classes=self.filtcls,
                         stream=False, verbose=False)[0]
+                        
+        ten = time.time_ns()
+        #print ('findbot2= %3.3fms'%((ten-tst)/1e6))
+        
+        boxes = (res.boxes.xyxy/SCALE).cpu().numpy()
+        if boxes.shape[0]>0:
+            print (res.boxes.conf)
+        for ix, box in enumerate(boxes):
+            bound = np.array([box[1],box[3],box[0],box[2]])
+            kp_list = res.keypoints.data[ix]/SCALE
+            #print (kp_list[0])
+            headxy = self.pin_head2(kp_list)
+            
+            results.append({
+                    'head' :headxy,
+                    'bound':bound,
+                    'pose' :kp_list})
+                    
+            if debug is not None:
+                cv2.rectangle(debug, topleft(bound), botright(bound), color=(0,0,255), thickness=1)
+                self.draw_keypoints(debug, kp_list)
+                kpx, kpy, headsize = headxy
+                circ = (kpy,kpy,kpx,kpx)
+                cv2.circle(debug, topleft(circ), int(headsize), color=(0,0,255), thickness=1)
+        return results
+
+        
+    def pose_findbot(self, img, img_offset=[0,0,0,0]):
+        tst = time.time_ns()
+        SCALE = 1#self.pose_scale(img) # zoom in if far away
+        #print (img.shape)
+        #print (SCALE)
+        #enlarge = cv2.resize(img, (0, 0), fx=SCALE, fy=SCALE)
+        #imgsz = np.array(enlarge.shape[:2])
+        #YOLO_STRIDE = 32
+        #imgsz = ((imgsz+YOLO_STRIDE-1)//YOLO_STRIDE)*YOLO_STRIDE # YOLO needs multiple of 32
+        pose = self.finemodel.predict(img,
+                        conf=0.2,
+                        imgsz=self.finedim,#tuple(imgsz), 
+                        classes=self.filtcls,
+                        stream=False, verbose=False)[0]
+        #print ('%s == %s'%(img_offset, pose.keypoints.data))
                         
         ten = time.time_ns()
         #print ('pose findbot= %3.3fms'%((ten-tst)/1e6))
@@ -380,4 +474,4 @@ def subimage(img, bound):
     y,y2,x,x2 = bound
     return img[int(y):int(y2),int(x):int(x2)]
     
-_ = BotPose()
+instance = BotPose()
