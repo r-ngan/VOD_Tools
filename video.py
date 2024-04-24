@@ -22,7 +22,7 @@ import InputAnalyzer
 import PoseAnalyzer
 import FlowAnalyzer
 import MoveAnalyzer
-from RangeStats import RangeStats
+import RangeStats
 
 BATCH = False # batch mode don't print on screen
 
@@ -286,9 +286,9 @@ def main(args):
         print ('time elapsed = %3.3fs'%((viden-vidst)/1e9))
         print ('avg per frame = %3.3fms'%(avg_time/1e6))
         
-        print ('%s'%(RangeStats.datastore), file=logstream)
-    print ('total trials = %d'%(RangeStats.trial_count))
-    RangeStats.summarize()
+        RangeStats.instance.summarize(file=logstream)
+    #print ('total trials = %d'%(RangeStats.trial_count))
+    RangeStats.instance.summarize()
     
     if vidout is not None:
         vidout.release()

@@ -9,14 +9,13 @@ import cv2
 import VideoAnalysis
 import VODEvents
 import VODState
-from ImgProc import OpticFlow, BotPose # dependency for generation
+#from ImgProc import OpticFlow, BotPose # dependency for generation
 
 # use bot poses to mark trial start/end
 class PoseAnalyzer(VideoAnalysis.Analyzer):
 
     def initialize(self, **kwargs):
         super().initialize(**kwargs)
-        self.last_poses = []
         
     def proc_frame(self, timestamp, img, aux_imgs={}):
         super().proc_frame(timestamp=timestamp, img=img, aux_imgs=aux_imgs)
@@ -33,6 +32,5 @@ class PoseAnalyzer(VideoAnalysis.Analyzer):
                 self.game_state = VODState.VOD_BOT_ONSCREEN
                 pub.sendMessage(VODEvents.BOT_APPEAR, timestamp=timestamp,
                                 x=bx,y=by,)
-        self.last_poses = aux_imgs['poses']
     
 _ = PoseAnalyzer()

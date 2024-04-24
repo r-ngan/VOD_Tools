@@ -10,8 +10,8 @@ from ImgProc import ImgEvents, Preprocessor
 from ImgProc import Delta, OpticFlow # dependency for generation
 
 DEBUG=True
-POSE_MODEL_PATH='assets/valbotm320-pose.pt'
-POSE_MODEL_IMGSZ=(320)
+POSE_MODEL_PATH='assets/valbots640-pose.pt'
+POSE_MODEL_IMGSZ=(640)
 
 # find location of bots and presents them for analyzers to use
 # Theory of operation:
@@ -50,7 +50,7 @@ class BotPose(Preprocessor.Preprocessor):
         
         if len(self.bots)>0:
             mid = np.array([self.midx, self.midy])
-            poses.extend([x.last_head[:2]-mid for x in self.bots])
+            poses.extend([(x.last_head[:2]-mid).cpu().numpy() for x in self.bots])
             
         pub.sendMessage(ImgEvents.APPEND, key='poses', imgdata=poses)
         if DEBUG:
@@ -70,13 +70,12 @@ class BotPose(Preprocessor.Preprocessor):
         ten = time.time_ns()
         #print ('findbot= %3.3fms'%((ten-tst)/1e6))
         
-        for b, kp_list in zip(res.boxes.data, res.keypoints.data):
-            box = b.cpu().numpy()
+        #print (res.boxes.conf)
+        for box, kp_list in zip(res.boxes.data, res.keypoints.data):
             det = Bot(self.xdim, self.ydim)
-            det.last_bound = np.array([box[1],box[3],box[0],box[2]])
-            det.last_pose = kp_list
-            headxy = det.pin_head()
-            det.last_head = headxy
+            det.last_bound = box.cpu()
+            det.last_pose = kp_list.cpu()
+            det.last_head = det.pin_head()
             results.append(det)
 
         return results
@@ -99,8 +98,8 @@ class BotPose(Preprocessor.Preprocessor):
             cv2.rectangle(debug, topleft(det.last_bound), botright(det.last_bound), color=color, thickness=1)
             self.draw_keypoints(debug, kp_list)
             kpx, kpy, headsize = headxy
-            circ = (kpy,kpy,kpx,kpx)
-            cv2.circle(debug, topleft(circ), int(headsize), color=(0,0,255), thickness=1)
+            circ = (kpx,kpy)
+            cv2.circle(debug, pixel(circ), int(headsize), color=(0,0,255), thickness=1)
         
     # compare the new hits against existing bots. use precision update to reduce noise on tracking bots
     def map_new_bots(self, new_bots, timestamp, flow):
@@ -133,15 +132,12 @@ class BotPose(Preprocessor.Preprocessor):
             self.bots[ix].last_ts = timestamp
             itaken.append(ix)
             jtaken.append(jx)
-        self.bots[:] = [x for x in self.bots if timestamp - x.last_ts < BOT_TIMEOUT] # remove stale bots
+        self.bots[:] = [x for x in self.bots if timestamp - x.last_ts <= BOT_TIMEOUT] # remove stale bots
         for jx in range(N):
             if not jx in jtaken:
                 new_bots[jx].last_ts = timestamp
                 self.bots.append(new_bots[jx])
                 #print ('new %s'%(jx))
-            
-        #print (sim_map)
-        #print (self.bots)
         
     def draw_keypoints(self, img, kp_list):
         # 17 keypoints in COCO dataset
@@ -209,13 +205,12 @@ class Bot:
     def sim_score(self, bot2): # get similarity between two detections
         a = self.last_head
         b = bot2.last_head
-        val = np.array(a-b)[:2]
-        dist = np.linalg.norm(val, axis=-1)
+        val = (a-b)[:2]
+        dist = torch.norm(val)
         return 20./(20.+dist)
         
-        
     def get_bound_xywh(self):
-        y1,y2,x1,x2 = self.last_bound
+        x1,y1,x2,y2 = self.last_bound.cpu().numpy()[:4]
         w = (x2-x1)/self.xdim
         h = (y2-y1)/self.ydim
         x = (x2+x1)/2/self.xdim
@@ -243,24 +238,21 @@ class Bot:
     def update_track(self, motion):
         dx = motion[0]
         dy = motion[1]
-        self.last_bound[2:] += dx
-        self.last_bound[:2] += dy
-        self.last_head[0] += dx
-        self.last_head[1] += dy
-        pose_delta = torch.tensor([dx,dy,0], device=self.last_pose.device)
-        self.last_pose = self.last_pose + pose_delta
+        delta = torch.tensor([dx,dy,0], device=self.last_pose.device)
+        self.last_bound[0::2] += dx
+        self.last_bound[1::2] += dy
+        self.last_head = self.last_head + delta
+        self.last_pose = self.last_pose + delta
         
     def pin_head(self, pose=None): # pure pose estimator
         if pose is None:
             pose = self.last_pose
         # use shoulders for head size
-        shoulders = pose[5:7].cpu()
-        base = self.get_weighted_avg(shoulders)
-        base_dist = math.dist(shoulders[0][:-1], shoulders[1][:-1])
-        headsize = base_dist*0.4 # head is proportion of shoulder
+        base_vector = pose[5]-pose[6] # shoulder keypoints
+        headsize = torch.norm(base_vector[:-1]) *0.45 # head is proportion of shoulder
         
-        head = pose[0].cpu()
-        headxy = np.array([head[0], head[1], headsize])
+        headxy = pose[0].clone().detach()
+        headxy[-1] = headsize
         return headxy
                 
     def refine(self, bot):
@@ -268,23 +260,29 @@ class Bot:
         new_bound = bot.last_bound
         new_headxy = bot.last_head
         
-        ALPHA = 0.2
-        cconf, cbox = self.get_chest_conf(new_pose)
+        ALPHA = 0.15
+        cconf = self.get_chest_conf(new_pose)
         robust = cconf>0.9
         if robust:
             self.last_bound = self.last_bound*(1-ALPHA) + new_bound*(ALPHA)
             self.last_head = self.last_head*(1-ALPHA) + new_headxy*(ALPHA)
-            self.last_pose = self.last_pose*(1-ALPHA) + new_pose*(ALPHA)
+            last_c = (self.last_pose[:,-1:]**6)*(1-ALPHA)
+            new_c = (new_pose[:,-1:]**6)*(ALPHA)
+            sum_c = last_c+new_c
+            
+            self.last_pose = self.last_pose*last_c/sum_c + \
+                            new_pose*new_c/sum_c
             
     # use a small region around the head for flow tracking
     def get_headbox(self):
-        PXE = 15
-        PXE_DOWN = 30
-        x1 = max(0,self.last_head[0]-PXE)
-        y1 = max(0,self.last_head[1]-PXE)
-        x2 = min(self.xdim,self.last_head[0]+PXE)
-        y2 = min(self.ydim,self.last_head[1]+PXE_DOWN)
-        return [y1,y2,x1,x2]        
+        PXE = self.last_head[-1] # radius of head
+        PXE_DOWN = PXE*2
+        x = self.last_head[0]
+        y = self.last_head[1]
+        res = torch.tensor([x-PXE,y-PXE,x+PXE,y+PXE_DOWN], device=self.last_head.device)
+        res[0::2] = torch.clip(res[0::2], min=0, max=self.xdim)
+        res[1::2] = torch.clip(res[1::2], min=0, max=self.ydim)
+        return res
         
     # Based on keypoints, check how confident a full body is present
     def get_body_conf(self, kp_list):
@@ -298,33 +296,15 @@ class Bot:
             return 0
         return sum([it[IX_CONF] for it in sub_list]) / len(sub_list)
         
-    # Based on keypoints, check how confident chest is good
+    # Based on keypoints, check how confident face+chest is good
     def get_chest_conf(self, kp_list):
-        chest_ix = [5,6,11,12]
-        chest = kp_list[chest_ix].cpu()
+        chest_ix = [0,5,6,11,12]
+        chest = kp_list[chest_ix]
         # pretend chest is axis-aligned bounding box (need to account rotate/warp later)
         chest_min = chest.min(axis=0).values
         chest_max = chest.max(axis=0).values
-        y1 = chest_min[1]
-        y2 = chest_max[1]
-        x1 = chest_min[0]
-        x2 = chest_max[0]
-        bound = np.array([y1,y2,x1,x2])
         
-        chest_conf = chest_min[-1]
-        return chest_conf, bound
-        
-    def get_weighted_avg(self, kp_list):
-        # items are [x,y,confidence]
-        IX_X = 0
-        IX_Y = 1
-        IX_CONF = 2
-        if len(kp_list)<1: # no key points
-            return None
-        weight_func = lambda x: x**2
-        weight_sum = sum([weight_func(it[IX_CONF]) for it in kp_list])
-        return (sum([it[IX_X]*weight_func(it[IX_CONF]) for it in kp_list])/weight_sum,
-                sum([it[IX_Y]*weight_func(it[IX_CONF]) for it in kp_list])/weight_sum)
+        return chest_min[-1]
         
 
    
@@ -341,15 +321,15 @@ def pixel(xy):
     return (int(x),int(y))
     
 def topleft(bound):
-    y,y2,x,x2 = bound
-    return (int(x),int(y))
+    x1,y1,x2,y2 = bound.cpu().numpy()[:4]
+    return (int(x1),int(y1))
 
 def botright(bound):
-    y,y2,x,x2 = bound
+    x1,y1,x2,y2 = bound.cpu().numpy()[:4]
     return (int(x2),int(y2))
     
 def subimage(img, bound):
-    y,y2,x,x2 = bound
-    return img[int(y):int(y2),int(x):int(x2)]
+    x1,y1,x2,y2 = bound.cpu().numpy()[:4]
+    return img[int(y1):int(y2),int(x1):int(x2)]
     
 instance = BotPose()
