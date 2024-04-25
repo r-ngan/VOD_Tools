@@ -2,20 +2,15 @@ import math
 import sys
 import traceback
 import json
-from pubsub import pub
 import numpy as np
 import cv2
 
-import VideoAnalysis
+from ImgProc import ImgTask
 import VODEvents
-import VODState
-from ImgProc import ImgEvents
-from ImgProc import Delta, BotPose # dependency for generation
 
 DEBUG=False
-
 # designed to work with the "Input Overlay" and "Mouse" OBS sources
-class InputAnalyzer(VideoAnalysis.Analyzer):
+class InputAnalyzer(ImgTask.ImgTask):
 
     def __init__(self, region, thres, key_size, **kwargs):
         super().__init__(**kwargs)
@@ -31,22 +26,35 @@ class InputAnalyzer(VideoAnalysis.Analyzer):
                 'uppseg': np.array(thrdata[1]),
                 'active': thrdata[2], })
         self.kern = np.ones((key_size,key_size), np.float32)/(key_size**2)# sum all in square neighborhood
+            
+    def requires(self):
+        return [ImgTask.VAL_FRAMENUM, 'delta', 'bothead_closest']
         
-    def initialize(self, **kwargs):
-        super().initialize(**kwargs)
+    def outputs(self):
+        if DEBUG:
+            return [VODEvents.EVENT_NODE, 'debug']
+        else:
+            return [VODEvents.EVENT_NODE]
+
+    # proc_frame signature must match requires / outputs
+    def proc_frame(self, timestamp, delta, bothead):
+        subimage = delta[self.y1:self.y2, self.x1:self.x2,:]
+        bx,by = bothead
         
-    def proc_frame(self, timestamp, img, aux_imgs={}):
-        super().proc_frame(timestamp=timestamp, img=img, aux_imgs=aux_imgs)
-        kbcrop = aux_imgs['delta'][self.y1:self.y2, self.x1:self.x2,:]
-        bx,by = BotPose.get_bot_pose(aux_imgs)
-        
+        res = []
+        dbg_img = None
         for rule in self.detect:
-            value = self.threshold(kbcrop, rule)
+            value = self.threshold(subimage, rule)
             if DEBUG:
-                pub.sendMessage(ImgEvents.APPEND, key='debug', imgdata=value)
+                dbg_img = value
             if (value.max()>rule['active']):
-                pub.sendMessage(rule['event'], timestamp=timestamp,
-                                x=bx,y=by,)
+                res.append({'topic': rule['event'],
+                            'timestamp':timestamp,
+                            'x':bx,'y':by,})
+        if DEBUG:
+            return res, dbg_img
+        else:
+            return res
         
     def threshold(self, img, rule):
         mask = cv2.inRange(img, rule['lowseg'], rule['uppseg']).astype(np.float32)/255. # 0 or 1 only

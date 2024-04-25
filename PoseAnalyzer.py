@@ -2,35 +2,39 @@ import math
 import sys
 import traceback
 import json
-from pubsub import pub
-import numpy as np
-import cv2
 
-import VideoAnalysis
+from ImgProc import ImgTask
 import VODEvents
 import VODState
-#from ImgProc import OpticFlow, BotPose # dependency for generation
 
 # use bot poses to mark trial start/end
-class PoseAnalyzer(VideoAnalysis.Analyzer):
+class PoseAnalyzer(ImgTask.ImgTask):
 
     def initialize(self, **kwargs):
         super().initialize(**kwargs)
+        self.game_state = VODState.VOD_IDLE
+            
+    def requires(self):
+        return ['frame_num', 'botposes']
         
-    def proc_frame(self, timestamp, img, aux_imgs={}):
-        super().proc_frame(timestamp=timestamp, img=img, aux_imgs=aux_imgs)
-        poses = aux_imgs['poses']
+    def outputs(self):
+        return [VODEvents.EVENT_NODE]
         
+    def proc_frame(self, timestamp, poses):
+        events = []
         if self.game_state == VODState.VOD_BOT_ONSCREEN:
             if len(poses) < 1:
                 self.game_state = VODState.VOD_IDLE
-                pub.sendMessage(VODEvents.BOT_NONE, timestamp=timestamp)
+                events.append({'topic':VODEvents.BOT_NONE, 
+                                'timestamp':timestamp})
             
         if self.game_state == VODState.VOD_IDLE: # full screen search
             if len(poses) > 0:
                 bx,by = poses[0]
                 self.game_state = VODState.VOD_BOT_ONSCREEN
-                pub.sendMessage(VODEvents.BOT_APPEAR, timestamp=timestamp,
-                                x=bx,y=by,)
+                events.append({'topic':VODEvents.BOT_APPEAR,
+                                'timestamp':timestamp,
+                                'x':bx,'y':by,})
+        return events
     
 _ = PoseAnalyzer()

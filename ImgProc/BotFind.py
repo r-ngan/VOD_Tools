@@ -1,15 +1,12 @@
 import math
 import time
-from pubsub import pub
 import numpy as np
 import cv2
 import torch
 from ultralytics import YOLO
 
-from ImgProc import ImgEvents, Preprocessor
-from ImgProc import Delta, OpticFlow # dependency for generation
+from ImgProc import ImgTask
 
-DEBUG=True
 POSE_MODEL_PATH='assets/valbots640-pose.pt'
 POSE_MODEL_IMGSZ=(640)
 
@@ -22,8 +19,7 @@ POSE_MODEL_IMGSZ=(640)
 #
 # Sometimes pose fitting will fail. Allow dead reckoning for a while until get a good lock
 # Each time pose fit succeeds, use head position to improve tracking
-BOT_TIMEOUT = 10
-class BotPose(Preprocessor.Preprocessor):
+class BotFind(ImgTask.ImgTask):
     
     def initialize(self, **kwargs):
         super().initialize(**kwargs)
@@ -35,30 +31,19 @@ class BotPose(Preprocessor.Preprocessor):
         for ix, cls in self.finemodel.names.items():
             if cls in ['person']:
                 self.filtcls.append(ix)
-        self.bots = []
-
-    def proc_frame(self, timestamp, img, aux_imgs={}):
-        if not self.check_requirements(aux_imgs, ['flow', 'abs_delta']):
-            return False
-        delta = aux_imgs['abs_delta']
-        
-        poses = []
-        dbg_img = np.array(img) if DEBUG else None
-        bots = self.findbot(img, debug=dbg_img)
-        self.map_new_bots(bots, timestamp, aux_imgs['flow'])
-        self.draw_bots(dbg_img)
-        
-        if len(self.bots)>0:
-            mid = np.array([self.midx, self.midy])
-            poses.extend([(x.last_head[:2]-mid).cpu().numpy() for x in self.bots])
             
-        pub.sendMessage(ImgEvents.APPEND, key='poses', imgdata=poses)
-        if DEBUG:
-            pub.sendMessage(ImgEvents.APPEND, key='debug', imgdata=dbg_img)
-            pub.sendMessage(ImgEvents.APPEND, key='debug', imgdata=aux_imgs['last'])
-        return True
+    def requires(self):
+        return [ImgTask.IMG_BASE]
         
-    def findbot(self, img, debug=None):
+    def outputs(self):
+        return ['botlist']
+
+    # proc_frame signature must match requires / outputs
+    def proc_frame(self, img):
+        bots = self.findbot(img)
+        return bots
+        
+    def findbot(self, img):
         results = []
         tst = time.time_ns()
         res = self.finemodel.predict(img,
@@ -79,115 +64,6 @@ class BotPose(Preprocessor.Preprocessor):
             results.append(det)
 
         return results
-        
-    def draw_bots(self, debug=None):
-        COL = [(0,0,255),
-                (0,255,255),
-                (0,255,0),
-                (255,0,255),
-                (255,0,0),
-                (255,255,0),
-                (255,255,255),
-                ]
-        if debug is None:
-            return
-        for ix, det in enumerate(self.bots):
-            headxy = det.last_head
-            kp_list = det.last_pose
-            color = COL[ix%len(COL)]
-            cv2.rectangle(debug, topleft(det.last_bound), botright(det.last_bound), color=color, thickness=1)
-            self.draw_keypoints(debug, kp_list)
-            kpx, kpy, headsize = headxy
-            circ = (kpx,kpy)
-            cv2.circle(debug, pixel(circ), int(headsize), color=(0,0,255), thickness=1)
-        
-    # compare the new hits against existing bots. use precision update to reduce noise on tracking bots
-    def map_new_bots(self, new_bots, timestamp, flow):
-        SIM_THRES = 0.1
-        M = len(self.bots)
-        N = len(new_bots)
-        sim_map = np.zeros([M,N])
-        itaken = []
-        jtaken = []
-        for ix, bot in enumerate(self.bots):
-            head_bound = bot.get_headbox()
-            flimg = subimage(flow, head_bound)
-            motion, mvar = OpticFlow.get_avg_flow(flimg)
-            # flow centroid variance threshold (too high will be inaccurate)
-            motion_reliable = mvar<0.01
-            if motion_reliable: # only track if the motion is stable
-                bot.update_track(motion)
-                
-            for jx, x in enumerate(new_bots):
-                similarity = bot.sim_score(x)
-                sim_map[ix,jx] = similarity
-        
-        flatord = np.argsort(sim_map, axis=None)[::-1] # sort best matches
-        x,y = np.unravel_index(flatord, sim_map.shape)
-        for ix,jx in zip(x,y):
-            if (ix in itaken) or (jx in jtaken) or sim_map[ix,jx]<SIM_THRES:
-                continue
-            #print ('map %s -> %s'%(jx, ix))
-            self.bots[ix].refine(new_bots[jx])
-            self.bots[ix].last_ts = timestamp
-            itaken.append(ix)
-            jtaken.append(jx)
-        self.bots[:] = [x for x in self.bots if timestamp - x.last_ts <= BOT_TIMEOUT] # remove stale bots
-        for jx in range(N):
-            if not jx in jtaken:
-                new_bots[jx].last_ts = timestamp
-                self.bots.append(new_bots[jx])
-                #print ('new %s'%(jx))
-        
-    def draw_keypoints(self, img, kp_list):
-        # 17 keypoints in COCO dataset
-        # 0 = nose
-        # 1 = left eye
-        # 2 = right eye
-        # 3 = left ear
-        # 4 = right ear
-        # 5 = left shoulder
-        # 6 = right shoulder
-        # 7 = left elbow
-        # 8 = right elbow
-        # 9 = left wrist
-        # 10 = right wrist
-        # 11 = left hip
-        # 12 = right hip
-        # 13 = left knee
-        # 14 = right knee
-        # 15 = left ankle
-        # 16 = right ankle
-        linepairs = [[0,5],
-                    [0,6],
-                    [5,6],
-                    [5,11],
-                    [6,12],
-                    [11,12],
-                    [11,13],
-                    [13,15],
-                    [12,14],
-                    [14,16],]
-        pos = kp_list[:,:-1]
-        kp_conf = kp_list[:,-1]
-            
-        for pair in linepairs:
-            conf = kp_conf[pair[0]]*kp_conf[pair[1]]
-            if conf<0.5:
-                continue
-            p0 = pos[pair[0]]
-            p1 = pos[pair[1]]
-            cv2.line(img, pixel(p0), pixel(p1), color=(0,128,255), thickness=2)
-        
-        for ix, xy in enumerate(pos):
-            kpcolor = (0,255,0)
-            if ix<5: # nose leye reye lear rear
-                kpcolor = (0,0,255)
-            elif 5<=ix<9: # lrshoulder lrelbow
-                kpcolor = (255,0,255)
-            kpx, kpy = xy
-            box = (kpy-1,kpy+1,kpx-1,kpx+1)
-            #cv2.rectangle(img, topleft(box), botright(box), color=kpcolor, thickness=1)
 
 # helper class to package bot into a data structure
 class Bot:
@@ -305,16 +181,6 @@ class Bot:
         chest_max = chest.max(axis=0).values
         
         return chest_min[-1]
-        
-
-   
-def get_bot_pose(aux_imgs={}):
-    res = [float('nan'),float('nan')]
-    if 'poses' in aux_imgs:
-        poses = aux_imgs['poses']
-        if len(poses)>0:
-            res = poses[0]
-    return res
     
 def pixel(xy):
     x,y = xy
@@ -332,4 +198,4 @@ def subimage(img, bound):
     x1,y1,x2,y2 = bound.cpu().numpy()[:4]
     return img[int(y1):int(y2),int(x1):int(x2)]
     
-instance = BotPose()
+instance = BotFind()

@@ -1,37 +1,20 @@
 import math
 import time
-from pubsub import pub
 import numpy as np
 import cv2
 from sklearn.cluster import BisectingKMeans
 
-from ImgProc import ImgEvents, Preprocessor
-from ImgProc import Delta # dependency for generation
+from ImgProc import ImgTask
+#from ImgProc import Delta # dependency for generation
 
-VIS_SIZE = 400
-VIS_SCALE = VIS_SIZE/ 80. # 80 px movement is full span
-KERN_SIZE = 15
 CLUSTERS = 5
 DOWNSCALE = 3
-class OpticFlow(Preprocessor.Preprocessor):
+class OpticFlow(ImgTask.ImgTask):
 
     def initialize(self, **kwargs):
         super().initialize(**kwargs)
         self.last_fprev = np.array([])
         self.last_fprev_hash = 0
-        
-        self.STRENGTH = 1e6/(self.xdim*self.ydim*self.depth)
-                
-        XSTEP = 20
-        YSTEP = 10
-        self.y,self.x = np.mgrid[YSTEP/2:self.ydim:YSTEP, XSTEP/2:self.xdim:XSTEP]. \
-                        reshape(2,-1).astype(int)
-        fu = self.x.astype(np.float32) - self.midx
-        fv = self.y.astype(np.float32) - self.midy
-        mag, ang = cv2.cartToPolar(fu, fv)
-        hsv = np.ones([self.ydim, self.xdim, 3], dtype=np.uint8)*255
-        hsv[self.y, self.x, 0] = ang[...,0]*180/np.pi/2
-        self.hue = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR).astype(np.float32)/255.
         
         self.flow = np.zeros([int(self.ydim//DOWNSCALE),
                             int(self.xdim//DOWNSCALE),2], dtype=np.float32)
@@ -46,37 +29,19 @@ class OpticFlow(Preprocessor.Preprocessor):
         self.last_fprev = fnext
         self.last_fprev_hash = hash(img.data.tobytes())
         
-    def vizflow(self, flow, str_mod=1):
-        vis = np.zeros([VIS_SIZE,VIS_SIZE,3], dtype=np.float32)
-        flow_mag = np.linalg.norm(flow[self.y,self.x], axis=-1)
-        moving = flow_mag>0.25 # filter down to reduce work on non-movement
-        fy,fx = self.y[moving], self.x[moving]
-        #fy,fx = self.y, self.x
-        if moving.sum()>100:
-            flist = flow[fy,fx].reshape(-1,2)
-            uvs = flow[fy,fx].T *VIS_SCALE
-            locs = (np.clip(uvs, -VIS_SIZE/2, VIS_SIZE/2-1)+VIS_SIZE/2).astype(int)
-            px = (locs[1],locs[0])
-            
-            # sum up flow heatmap to xy grid
-            np.add.at(vis, px, self.STRENGTH*str_mod*self.hue[fy,fx]) # at allows repeated indices
-            vis = cv2.GaussianBlur(vis, (KERN_SIZE, KERN_SIZE), 1.) # smooth the heatmap
-        return (np.clip(vis,0,1.)*255).astype(np.uint8)
+    def requires(self):
+        return [ImgTask.IMG_BASE, ImgTask.IMG_LAST, ImgTask.IMG_ABSD]
         
-    def proc_frame(self, timestamp, img, aux_imgs={}):
-        if not self.check_requirements(aux_imgs, ['base', 'last', 'abs_delta']):
-            return False
-        lframe = aux_imgs['last']
-        frame = aux_imgs['base']
-        abs_delta = aux_imgs['abs_delta'] # abs_delta to check moving
+    def outputs(self):
+        return [ImgTask.IMG_FLOW]
         
+    def proc_frame(self, frame, lframe, abs_delta):        
         # movement threshold
-        moving = False
+        moving = True
         VAL_THRES = 20
         COUNT_THRES = int(0.003*self.xdim*self.ydim*self.depth)
         if (abs_delta > VAL_THRES).sum() > COUNT_THRES:
             moving = True
-            pub.sendMessage(ImgEvents.APPEND, key='moving', imgdata=[True])
         
         if moving: # only calculate optic flow if sufficient movement
             tst = time.time_ns()
@@ -98,8 +63,7 @@ class OpticFlow(Preprocessor.Preprocessor):
         else:
             flow = np.zeros_like(frame, dtype=float)[...,:2]
         
-        pub.sendMessage(ImgEvents.APPEND, key='flow', imgdata=flow)
-        return True
+        return flow
 
 def get_avg_flow(flow):
     flist = flow.reshape(-1,2)

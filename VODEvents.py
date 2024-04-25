@@ -14,8 +14,9 @@ MOUSE_LMB_UP = 'MLMBEND'
 MOUSE_RMB_DOWN = 'MRMBSTART'
 MOUSE_RMB_UP = 'MRMBEND'
 
+EVENT_NODE = 'EVENT_NODE'
 
 # make mock listeners to establish pubsub MDS
-def initialize(width=0, height=0, depth=0, frame_rate=0):
+def initialize(pipe, width=0, height=0, depth=0, frame_rate=0):
     pass
 pub.subscribe(initialize, VOD_START)

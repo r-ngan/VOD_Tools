@@ -5,23 +5,28 @@ import time
 import traceback
 import json
 from pubsub import pub
+import schedula as sh
 import numpy as np
 import cv2
 
 import VODEvents
 import Capture
-import VideoAnalysis
-from ImgProc import ImgEvents
+from ImgProc import ImgTask
 
 #import automatically activates the module
-#import ImgProc.Delta
-#from ImgProc import OpticViz
-#import ImgProc.BotPose
-import DefaultEvRouter
+import ImgProc.Delta
+import ImgProc.OpticFlow
+import ImgProc.BotFind
+import ImgProc.BotTrack
+import ImgProc.BestBot
+import ImgProc.MotionAnalyzer
+import ImgProc.VizFlow
+#import ImgProc.VizMotion
+#import ImgProc.VizPredict
+#import ImgProc.VizBots
+import ImgProc.MouseTrack
 import InputAnalyzer
 import PoseAnalyzer
-import FlowAnalyzer
-import MoveAnalyzer
 import RangeStats
 
 BATCH = False # batch mode don't print on screen
@@ -31,9 +36,6 @@ mousey = 0
 mouse_text = ''
 frame_num = 0
 frame_data = np.array([])
-frame_db = {}
-frame_wait = False
-waiters = []
 logstream = sys.stdout
 
 def get_mouse(event, x, y, flags, param):
@@ -74,29 +76,27 @@ def draw_text(frame, text, x, y):
 def dbg_event(topic=pub.AUTO_TOPIC, **kwargs):
     global logstream
     if (not topic.getName() == VODEvents.VOD_FRAME) and \
-        (not topic.getName() == ImgEvents.PREPROCESS) and \
-        (not topic.getName() == ImgEvents.APPEND) and \
-        (not topic.getName() == ImgEvents.DONE) and \
         (not topic.getName().startswith('capture.')):
         print ('event %s / %s'%(topic.getName(), kwargs), file=logstream)
-
-def frame_append(key, imgdata, topic=pub.AUTO_TOPIC, **kwargs):
-    global frame_db
-    if key=='debug':
-        if not BATCH:
-            frame_db[key].append(imgdata)
-    else:
-        if key in frame_db:
-            print ('!warning: %s already in frame db'%(key))
-        frame_db[key] = imgdata
     
-def frame_delay(id, topic=pub.AUTO_TOPIC, **kwargs): # at least one module requesting wait
-    global frame_wait, waiters
-    frame_wait = True
-    waiters.append(id)
+def unroll(eventdict): # convert dict format into list
+    res = []
+    for k,v in eventdict.items():
+        if v is not None:
+            res.append(v)
+    return res
+    
+def print_runtime():
+    total=0
+    for k,v in ImgTask.pipe.dsp.solution.workflow.nodes.items():
+        if 'duration' in v:
+            dur = v['duration']*1000
+            total += dur
+            print ('  %s : %5.2fms'%(k, dur))
+    print ('seq time= %s'%(total))
 
 def main(args):
-    global logstream, frame_data, frame_num, frame_db, frame_wait, waiters
+    global logstream, frame_data, frame_num, frame_wait, waiters
     
     argp = argparse.ArgumentParser(description='VOD review tool')
     argp.add_argument('source', nargs='?', default='test.mkv', 
@@ -148,13 +148,15 @@ def main(args):
     with open('zlog.txt', 'w', buffering=1) as logfile: # line buffered
         logstream = logfile
         pub.subscribe(dbg_event, pub.ALL_TOPICS)
-        pub.subscribe(frame_append, ImgEvents.APPEND)
-        pub.subscribe(frame_delay, ImgEvents.DELAY)
         pub.sendMessage(VODEvents.VOD_START, 
+                        pipe= ImgTask.pipe,
                         width= xdim,
                         height= ydim,
                         depth= depth,
                         frame_rate= frate,) # initialize all modules
+        # configure reduce nodes
+        ImgTask.pipe.add_capture(ImgTask.IMG_DEBUG)
+        ImgTask.pipe.add_capture(VODEvents.EVENT_NODE)
         
         if not BATCH:
             cv2.namedWindow('VODTool')
@@ -176,44 +178,25 @@ def main(args):
             if (frame_num%frate)==0:
                 perc = frame_num / frames_total * 100.
                 print ('%5.1f%% done. timestamp= %4.1f s'%(perc, cap.get(cv2.CAP_PROP_POS_MSEC)/1000))
-                
-            # reset frame db
-            frame_db.clear()
-            frame_db['base'] = frame
-            frame_db['last'] = lframe
-            frame_db['debug'] = []
-            
+                print_runtime()
             
             tst = time.time_ns()
-            frame_wait = True
-            while (frame_wait): # preprocessors can request wait if out of order due to pubsub, forms a DAG of processing
-                frame_wait = False
-                waiters.clear()
-                db_size = len(frame_db)
-                pub.sendMessage(ImgEvents.PREPROCESS,
-                            timestamp= frame_num,
-                            img= frame,
-                            aux_imgs= frame_db,)
-                if frame_wait: # wait requested
-                    curr_db_size = len(frame_db)
-                    if curr_db_size<=db_size: # no changes since last cycle, stuck
-                        print ('preprocess done, some modules failed: %s'%(waiters))
-                        break
-            pub.sendMessage(ImgEvents.DONE) # preprocessing is done, clean up
+            outs = [#RangeStats.NODE, 
+                    ImgTask.IMG_DEBUG]
+            sol = ImgTask.pipe.run_pipe(ins={'base': frame, 
+                                        'last': lframe,
+                                        'frame_num': frame_num,
+                                        'timestamp': int(frame_num*1000/frate),
+                                        }, outs=outs)
+            for k in outs: # pad defaults for event and debug list
+                if k not in sol.keys():
+                    sol[k]={}
             ten = time.time_ns()
-            #print ('img proc= %3.3fms'%((ten-tst)/1e6))
+            #print ('pipe= %3.3fms'%((ten-tst)/1e6))
             
-            tst = time.time_ns()
-            # all preprocessors done, go to analysis
-            pub.sendMessage(VODEvents.VOD_FRAME,
-                        timestamp= frame_num,
-                        img= frame,
-                        aux_imgs= frame_db,)
-            ten = time.time_ns()
-            #print ('analysis= %3.3fms'%((ten-tst)/1e6))
-            
+            frame_dbg = unroll(sol[ImgTask.IMG_DEBUG])
             if vidout is not None:
-                dbg_out = frame_db['debug'][0]
+                dbg_out = frame_dbg[0]
                 draw_text(dbg_out, '%d'%(frame_num), 1800,50)
                 vidout.write(dbg_out)
             if BATCH:
@@ -222,7 +205,7 @@ def main(args):
                 
             while (1): # show frame and wait for user input
                 if show_img>0:
-                    output = np.array(frame_db['debug'][show_img-1])
+                    output = np.array(frame_dbg[show_img-1])
                 else:
                     output = np.array(frame)
                 frame_data = output
@@ -243,11 +226,11 @@ def main(args):
                         time.sleep(0.060)
                         continue
                 if key==ord('r'): # flip display
-                    show_img = (show_img-1)%(len(frame_db['debug'])+1)
+                    show_img = (show_img-1)%(len(frame_dbg)+1)
                     #print ('showing %s'%(show_img))
                     continue
                 if key==ord('f'): # flip display
-                    show_img = (show_img+1)%(len(frame_db['debug'])+1)
+                    show_img = (show_img+1)%(len(frame_dbg)+1)
                     #print ('showing %s'%(show_img))
                     continue
                 if key==ord('k'): # play/pause
