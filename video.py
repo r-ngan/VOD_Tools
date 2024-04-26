@@ -11,7 +11,7 @@ import cv2
 
 import VODEvents
 import Capture
-from ImgProc import ImgTask
+from ImgProc import ImgTask, ImgEvents
 
 #import automatically activates the module
 import ImgProc.Delta
@@ -20,14 +20,15 @@ import ImgProc.BotFind
 import ImgProc.BotTrack
 import ImgProc.BestBot
 import ImgProc.MotionAnalyzer
-import ImgProc.VizFlow
+#import ImgProc.VizFlow
 #import ImgProc.VizMotion
 #import ImgProc.VizPredict
-#import ImgProc.VizBots
+import ImgProc.VizBots
 import ImgProc.MouseTrack
 import InputAnalyzer
 import PoseAnalyzer
 import RangeStats
+from ImgProc import VideoSource
 
 BATCH = False # batch mode don't print on screen
 
@@ -75,8 +76,7 @@ def draw_text(frame, text, x, y):
 
 def dbg_event(topic=pub.AUTO_TOPIC, **kwargs):
     global logstream
-    if (not topic.getName() == VODEvents.VOD_FRAME) and \
-        (not topic.getName().startswith('capture.')):
+    if (not topic.getName().startswith('capture.')):
         print ('event %s / %s'%(topic.getName(), kwargs), file=logstream)
     
 def unroll(eventdict): # convert dict format into list
@@ -85,6 +85,12 @@ def unroll(eventdict): # convert dict format into list
         if v is not None:
             res.append(v)
     return res
+    
+def fill_missing(eventdict, keys):
+    for k in keys: # pad defaults for event and debug list
+        if k not in eventdict.keys():
+            eventdict[k]={}
+    return eventdict
     
 def print_runtime():
     total=0
@@ -109,24 +115,24 @@ def main(args):
                     help='dump out debug frame to video file')
     params = argp.parse_args(args)
     
-    cap = cv2.VideoCapture(params.source)
-    if not cap.isOpened():
-        print ('error opening')
+    src = VideoSource.instance
+    if not src.open(params.source):
+        print ('FATAL ERROR: cannot open video')
         return
-    
-    SKIP_FRAMES = params.skip # skip VOD preamble
+        
+    DUMP = False
+    if params.dump is not None:
+        DUMP = True
+        from ImgProc import VideoWriter
+        VideoWriter.path = params.dump
+        print('Video writer imported')
+        
+    src.skip_to_frame(params.skip) # skip VOD preamble
     # 23-09-15 tricky bot appear: 1440, 2590
     # 23-12-24 tricky bot appear: 811, 1433
-    cap.set(cv2.CAP_PROP_POS_FRAMES, SKIP_FRAMES-1)
-    frame_num = SKIP_FRAMES-1
-    ret, frame = cap.read()
-    ydim, xdim, depth = frame.shape
-    midx = xdim//2
-    midy = ydim//2
-    frate = cap.get(cv2.CAP_PROP_FPS)
-    frames_total = int(cap.get( cv2.CAP_PROP_FRAME_COUNT))
-    print ('Video = %s @ %s fps. %s frames'%(frame.shape,frate, frames_total))
-    
+    xdim, ydim, frate, frames_total = src.get_video_params()
+    depth = src.frame.shape[-1]
+    print ('Video = %s @ %s fps. %s frames'%(src.frame.shape, frate, frames_total))
     
     show_img = 0
     autoplay = params.manual
@@ -138,22 +144,17 @@ def main(args):
         #pub.subscribe(breakpoint, VODEvents.KEY_ANY_DOWN) # pause at certain events
     else:
         autoplay = True
-        
-    DUMP_DBG = params.dump
-    vidout = None
-    if DUMP_DBG is not None:
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        vidout = cv2.VideoWriter(DUMP_DBG, fourcc, frate, (xdim, ydim))
     
     with open('zlog.txt', 'w', buffering=1) as logfile: # line buffered
         logstream = logfile
         pub.subscribe(dbg_event, pub.ALL_TOPICS)
-        pub.sendMessage(VODEvents.VOD_START, 
+        pub.sendMessage(ImgEvents.INIT, 
                         pipe= ImgTask.pipe,
                         width= xdim,
                         height= ydim,
                         depth= depth,
                         frame_rate= frate,) # initialize all modules
+        RangeStats.add_log_target(logstream)
         # configure reduce nodes
         ImgTask.pipe.add_capture(ImgTask.IMG_DEBUG)
         ImgTask.pipe.add_capture(VODEvents.EVENT_NODE)
@@ -161,57 +162,41 @@ def main(args):
         if not BATCH:
             cv2.namedWindow('VODTool')
             cv2.setMouseCallback('VODTool', get_mouse)
-        PAUSE = False
         
         vidst = time.time_ns()
-        while(cap.isOpened()):
-            if not PAUSE:
-                lframe = frame
-                ret, frame = cap.read()
-            else:
-                PAUSE = False
-            if not ret: # out of frames, VOD done
-                break
-            frame_num += 1
-            if frame_num < SKIP_FRAMES:
-                continue
+        while(src.cap_ok()):
+            frame_num = src.frame_num
             if (frame_num%frate)==0:
                 perc = frame_num / frames_total * 100.
-                print ('%5.1f%% done. timestamp= %4.1f s'%(perc, cap.get(cv2.CAP_PROP_POS_MSEC)/1000))
+                print ('%5.1f%% done. timestamp= %4.1f s'%(perc, src.get_video_ts()/1000))
                 print_runtime()
             
             tst = time.time_ns()
-            outs = [#RangeStats.NODE, 
-                    ImgTask.IMG_DEBUG]
-            sol = ImgTask.pipe.run_pipe(ins={'base': frame, 
-                                        'last': lframe,
-                                        'frame_num': frame_num,
-                                        'timestamp': int(frame_num*1000/frate),
-                                        }, outs=outs)
-            for k in outs: # pad defaults for event and debug list
-                if k not in sol.keys():
-                    sol[k]={}
+            outs = [RangeStats.NODE]
+            outs.append(ImgTask.IMG_DEBUG)
+            if DUMP:
+                outs.append(VideoWriter.WRITER_NODE)
+            try:
+                sol = ImgTask.pipe.run_pipe(ins=None, outs=outs)
+            except VideoSource.VideoException: # out of frames
+                break
             ten = time.time_ns()
             #print ('pipe= %3.3fms'%((ten-tst)/1e6))
             
-            frame_dbg = unroll(sol[ImgTask.IMG_DEBUG])
-            if vidout is not None:
-                dbg_out = frame_dbg[0]
-                draw_text(dbg_out, '%d'%(frame_num), 1800,50)
-                vidout.write(dbg_out)
             if BATCH:
                 continue # skip user interface
             
                 
+            sol = fill_missing(sol, outs)
+            frame_dbg = unroll(sol[ImgTask.IMG_DEBUG])
             while (1): # show frame and wait for user input
                 if show_img>0:
                     output = np.array(frame_dbg[show_img-1])
                 else:
-                    output = np.array(frame)
+                    output = np.array(src.frame)
                 frame_data = output
                     
                 #MoveAnalyzer.instance.draw_hist(output)
-                #cv2.rectangle(output,(midx-1,midy-1),(midx+1,midy+1),(255,255,255),1)
                 draw_text(output, mouse_text, 50,50)
                 
                 draw_text(output, '%d'%(frame_num), 1800,50)
@@ -265,20 +250,13 @@ def main(args):
                 break
                 
         viden = time.time_ns()
-        avg_time = (viden-vidst)/(frame_num-SKIP_FRAMES)
+        avg_time = (viden-vidst)/(frame_num-params.skip)
         print ('time elapsed = %3.3fs'%((viden-vidst)/1e9))
         print ('avg per frame = %3.3fms'%(avg_time/1e6))
+        pub.sendMessage(ImgEvents.DONE) # clean up modules
         
-        RangeStats.instance.summarize(file=logstream)
     #print ('total trials = %d'%(RangeStats.trial_count))
-    RangeStats.instance.summarize()
     
-    if vidout is not None:
-        vidout.release()
-    #with open('zz2.csv', 'w') as dumpfile:
-    #    for x in InputAnalyzer.key_data:
-    #        dumpfile.write('%s\n'%(x))
-    cap.release()
     cv2.destroyAllWindows()
 
     print ('ok finished')

@@ -1,5 +1,3 @@
-from pubsub import pub
-
 VOD_START = 'VSTART' # shared with ImgEvent.INIT
 VOD_FRAME = 'VFRAME'
 VOD_END = 'VEND'
@@ -16,7 +14,3 @@ MOUSE_RMB_UP = 'MRMBEND'
 
 EVENT_NODE = 'EVENT_NODE'
 
-# make mock listeners to establish pubsub MDS
-def initialize(pipe, width=0, height=0, depth=0, frame_rate=0):
-    pass
-pub.subscribe(initialize, VOD_START)

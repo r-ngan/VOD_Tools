@@ -19,7 +19,6 @@ IMG_DEBUG = 'debug'
 
 class ImgTask():
     def __init__(self, xdim=0, ydim=0, depth=0):
-        self.frame_done = False
         self.xdim = 0
         self.ydim = 0
         self.midx = self.xdim//2
@@ -27,10 +26,9 @@ class ImgTask():
         self.depth = 0
         self.ms_fr = 1
         pub.subscribe(self.initialize, ImgEvents.INIT)
-        pub.subscribe(self.reset, ImgEvents.DONE)
+        pub.subscribe(self.close, ImgEvents.DONE)
         
     def initialize(self, pipe, topic=pub.AUTO_TOPIC, **data):
-        self.frame_done = False
         if _WIDTH_KEY in data:
             self.xdim = data[_WIDTH_KEY]
             self.midx = data[_WIDTH_KEY]//2
@@ -44,10 +42,8 @@ class ImgTask():
         pipe.register(self.proc_frame, name=str(self.__class__),
                     reqs=self.requires(), outs=self.outputs())
             
-    def reset (self):
-        if not self.frame_done:
-            print ('Warning: missed processing on %s'%(self.__class__))
-        self.frame_done = False
+    def close(self):
+        pass
         
     def requires(self):
         return [VAL_FRAMENUM, IMG_BASE]
@@ -61,7 +57,7 @@ class ImgTask():
         
 class ImgPipe():
     def __init__(self, name='ImgPipe'):
-        self.dsp = sh.Dispatcher(name=name)
+        self.dsp = sh.Dispatcher(name=name, raises=True)
         self.dsp.add_data(data_id=IMG_BASE)
         self.dsp.add_data(data_id=IMG_LAST)
         self.dsp.add_data(data_id=VAL_FRAMENUM)
@@ -74,9 +70,20 @@ class ImgPipe():
         self.dsp.add_function(function=callable, inputs=reqs, outputs=outs, function_id=name)
         
     def run_pipe(self, ins, outs):
-        self.sol = self.dsp.dispatch(inputs=ins, outputs=outs, executor='async')
-        self.sol.result() # resolve async
-        res = {k:self.sol[k] for k in outs if k in self.sol.keys()}
+        try:
+            sol = self.dsp.dispatch(inputs=ins, outputs=outs, executor='async')
+            self.sol = sol
+            res = sol.result() # resolve async 
+        except sh.utils.exc.DispatcherError as e: # out of frames
+            raise e.ex # flag true exception, not wrapper
+        
+        res = {k:sol[k] for k in outs if k in sol.keys()}
         return res
+
+
+# make mock listeners to establish pubsub MDS
+def initialize(pipe, width=0, height=0, depth=0, frame_rate=0):
+    pass
+pub.subscribe(initialize, ImgEvents.INIT)
 
 pipe = ImgPipe()

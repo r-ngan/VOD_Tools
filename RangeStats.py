@@ -26,10 +26,14 @@ class RangeStats(ImgTask.ImgTask):
         self.df = pd.DataFrame([], columns=[
                         'B1','B2','M1','M2','K1','K2','Bpos1','Bpos2',])
         self.last_ix = 0
+        self.log_target = [sys.stdout]
         
     def initialize(self, **kwargs):
         super().initialize(**kwargs)
         self.wait_for_bot = True
+        
+    def close(self):
+        self.summarize()
         
     def store(self, column, value, row=None):
         if row is None:
@@ -102,9 +106,7 @@ class RangeStats(ImgTask.ImgTask):
             
         print ('trial #%s done'%(RangeStats.trial_count))
             
-    def summarize(self, file=None):
-        if file==None:
-            file = sys.stdout
+    def summarize(self):
         STOP_TIME = 90 #ms (6 fr at 60fps)
         HEAD_RAD = 8 #px, TODO convert into degrees
         self.df['t_react'] = (self.df[['M1','K1']].min(axis=1) - self.df['B1']) * self.ms_fr
@@ -117,12 +119,18 @@ class RangeStats(ImgTask.ImgTask):
         
         self.df['hit'] = (self.df['t_stop']>=STOP_TIME) & (self.df['d_target']<=HEAD_RAD)
         
-        print(self.df.to_string(), file=file)
+        for file in self.log_target:
+            print(self.df.to_string(), file=file)
         for key in RangeStats.formatting.keys():
             values = self.df[key]
             meta = RangeStats.formatting[key]
             stat = meta['func'](values)
             fstring = '%s = ' + meta['prec'] +'%s'
-            print(fstring%(meta['desc'], stat, meta['unit']), file=file)
+            for file in self.log_target:
+                print(fstring%(meta['desc'], stat, meta['unit']), file=file)
             
+        
+def add_log_target(stream):
+    instance.log_target.append(stream)
+    
 instance = RangeStats()
