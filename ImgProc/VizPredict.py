@@ -7,7 +7,7 @@ from ImgProc import ImgTask
 
 DEBUG=True # module is only used for debugging
 
-DOWNSCALE = 2
+DOWNSCALE = 1
 class VizPredict(ImgTask.ImgTask):
 
     def initialize(self, **kwargs):
@@ -18,12 +18,12 @@ class VizPredict(ImgTask.ImgTask):
         self.xy[...,1] = self.y
             
     def requires(self):
-        return [ImgTask.IMG_BASE, ImgTask.IMG_LAST, ImgTask.IMG_FLOW, ImgTask.IMG_ABSD]
+        return [ImgTask.IMG_LAST, ImgTask.IMG_FLOW]
         
     def outputs(self):
-        return [ImgTask.IMG_DEBUG]
+        return [ImgTask.IMG_DEBUG, 'predict']
     
-    def proc_frame(self, img, lframe, flow, imgdelta):
+    def proc_frame(self, lframe, flow):
         #self.get_changed_regions(imgdelta)
         
         no_move = np.sum(imgdelta, axis=-1)<15
@@ -37,11 +37,8 @@ class VizPredict(ImgTask.ImgTask):
         np.clip(uvmap[:,1], 0, self.ydim-1, out=uvmap[:,1])
         viz = lframe[uvmap[:,1], uvmap[:,0]]
         
-        #delta = (img[self.y,self.x] - viz).reshape(self.ydim//DOWNSCALE,self.xdim//DOWNSCALE,3)
-        #delta_norm = np.linalg.norm(delta, axis=-1)
-        #delta_thres = (delta_norm>110).astype(np.uint8)
         viz = viz.reshape(self.ydim//DOWNSCALE,self.xdim//DOWNSCALE,3)
         
-        return viz #, no_move.astype(np.uint8)*255
+        return viz, viz #, no_move.astype(np.uint8)*255
 
 _ = VizPredict()

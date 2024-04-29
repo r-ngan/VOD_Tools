@@ -55,6 +55,13 @@ class ImgTask():
     def proc_frame(self, timestamp, img):
         return None
         
+    def unroll(self, eventdict): # convert dict format into list
+        res = []
+        for k,v in eventdict.items():
+            if v is not None:
+                res.extend(v)
+        return res
+        
 class ImgPipe():
     def __init__(self, name='ImgPipe'):
         self.dsp = sh.Dispatcher(name=name, raises=True)

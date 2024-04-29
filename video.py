@@ -20,11 +20,13 @@ import ImgProc.BotFind
 import ImgProc.BotTrack
 import ImgProc.BestBot
 import ImgProc.MotionAnalyzer
+import ImgProc.MouseTrack
+#import ImgProc.VizDelta
 #import ImgProc.VizFlow
 #import ImgProc.VizMotion
 #import ImgProc.VizPredict
-import ImgProc.VizBots
-import ImgProc.MouseTrack
+#import ImgProc.VizBots
+#import ImgProc.VizTrack
 import InputAnalyzer
 import PoseAnalyzer
 import RangeStats
@@ -35,7 +37,6 @@ BATCH = False # batch mode don't print on screen
 mousex = 0
 mousey = 0
 mouse_text = ''
-frame_num = 0
 frame_data = np.array([])
 logstream = sys.stdout
 
@@ -79,11 +80,14 @@ def dbg_event(topic=pub.AUTO_TOPIC, **kwargs):
     if (not topic.getName().startswith('capture.')):
         print ('event %s / %s'%(topic.getName(), kwargs), file=logstream)
     
-def unroll(eventdict): # convert dict format into list
+def unroll(eventdict, listed=False): # convert dict format into list
     res = []
     for k,v in eventdict.items():
         if v is not None:
-            res.append(v)
+            if listed:
+                res.extend(v)
+            else:
+                res.append(v)
     return res
     
 def fill_missing(eventdict, keys):
@@ -99,10 +103,10 @@ def print_runtime():
             dur = v['duration']*1000
             total += dur
             print ('  %s : %5.2fms'%(k, dur))
-    print ('seq time= %s'%(total))
+    #print ('seq time= %s'%(total))
 
 def main(args):
-    global logstream, frame_data, frame_num, frame_wait, waiters
+    global logstream, frame_data
     
     argp = argparse.ArgumentParser(description='VOD review tool')
     argp.add_argument('source', nargs='?', default='test.mkv', 
@@ -134,14 +138,31 @@ def main(args):
     depth = src.frame.shape[-1]
     print ('Video = %s @ %s fps. %s frames'%(src.frame.shape, frate, frames_total))
     
+    outs = [RangeStats.NODE]
+    outs.append(ImgTask.IMG_DEBUG)
+    if DUMP:
+        outs.append(VideoWriter.WRITER_NODE)
+    
     show_img = 0
     autoplay = params.manual
     if not BATCH:
         def breakpoint(timestamp=0, x=0, y=0):
             nonlocal autoplay
             autoplay = False
-        #pub.subscribe(breakpoint, VODEvents.BOT_APPEAR) # pause at certain events
-        #pub.subscribe(breakpoint, VODEvents.KEY_ANY_DOWN) # pause at certain events
+            
+        def filter_event(eventdict):
+            events = unroll(eventdict, listed=True)
+            for x in events:
+                #if False:
+                if x['topic'] == VODEvents.BOT_APPEAR: # break on certain events
+                    breakpoint()
+                    return 0
+            return 0
+
+        NODE_BREAK = 'BREAKPT'
+        ImgTask.pipe.register(filter_event, name='breakpoint',
+                            reqs=[VODEvents.EVENT_NODE], outs=[NODE_BREAK])
+        #outs.append(NODE_BREAK)
     else:
         autoplay = True
     
@@ -155,6 +176,7 @@ def main(args):
                         depth= depth,
                         frame_rate= frate,) # initialize all modules
         RangeStats.add_log_target(logstream)
+        ImgProc.MotionAnalyzer.add_log_target(logstream)
         # configure reduce nodes
         ImgTask.pipe.add_capture(ImgTask.IMG_DEBUG)
         ImgTask.pipe.add_capture(VODEvents.EVENT_NODE)
@@ -165,17 +187,7 @@ def main(args):
         
         vidst = time.time_ns()
         while(src.cap_ok()):
-            frame_num = src.frame_num
-            if (frame_num%frate)==0:
-                perc = frame_num / frames_total * 100.
-                print ('%5.1f%% done. timestamp= %4.1f s'%(perc, src.get_video_ts()/1000))
-                print_runtime()
-            
             tst = time.time_ns()
-            outs = [RangeStats.NODE]
-            outs.append(ImgTask.IMG_DEBUG)
-            if DUMP:
-                outs.append(VideoWriter.WRITER_NODE)
             try:
                 sol = ImgTask.pipe.run_pipe(ins=None, outs=outs)
             except VideoSource.VideoException: # out of frames
@@ -183,12 +195,21 @@ def main(args):
             ten = time.time_ns()
             #print ('pipe= %3.3fms'%((ten-tst)/1e6))
             
+            frame_num = src.frame_num
+            if (frame_num%frate)==0:
+                perc = frame_num / frames_total * 100.
+                print ('%5.1f%% done. timestamp= %4.1f s'%(perc, src.get_video_ts()/1000))
+                #print_runtime()
+            
             if BATCH:
                 continue # skip user interface
             
                 
             sol = fill_missing(sol, outs)
-            frame_dbg = unroll(sol[ImgTask.IMG_DEBUG])
+            if ImgTask.IMG_DEBUG in sol:
+                frame_dbg = unroll(sol[ImgTask.IMG_DEBUG])
+            else:
+                frame_dbg = []
             while (1): # show frame and wait for user input
                 if show_img>0:
                     output = np.array(frame_dbg[show_img-1])

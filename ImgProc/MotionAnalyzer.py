@@ -9,6 +9,7 @@ from scipy.special import huber
 
 from ImgProc import ImgTask
             
+CUDA = False
 XFACTOR = 0.
 YFACTOR = 0.
 ZFACTOR = 0.
@@ -20,42 +21,50 @@ class MotionAnalyzer(ImgTask.ImgTask):
 
     def initialize(self, **kwargs):
         super().initialize(**kwargs)
-        self.PTDEV = torch.device('cpu')
-        if torch.cuda.is_available():
-            torch.cuda.set_device(0)
-        #    self.PTDEV = PTDEV = torch.device('cuda')
+        if CUDA and torch.cuda.is_available():
+            torch.set_default_device('cuda')
         # optimizer is not working well with GPU-CPU thrashing
                 
         # subsample to increase speed
-        XSTEP = 45
-        YSTEP = 25
-        TRIM_Y1 = 90
-        TRIM_Y2 = 90
-        self.y,self.x = np.mgrid[TRIM_Y1+YSTEP/2:self.ydim-TRIM_Y2:YSTEP, XSTEP/2:self.xdim:XSTEP]. \
-                        reshape(2,-1).astype(int)
+        self.XSTEP = XSTEP = self.xdim//40
+        self.YSTEP = YSTEP = self.ydim//40
+        TRIM_Y1 = self.ydim//12 # 90px at 1080p
+        TRIM_Y2 = self.ydim//12
+        yx = np.mgrid[TRIM_Y1+YSTEP/2:self.ydim-TRIM_Y2:YSTEP, XSTEP/2:self.xdim:XSTEP]
+        self.y,self.x = yx.reshape(2,-1).astype(int)
+        
+        expand_yx = cv2.resize(np.moveaxis(yx,0,-1), (0, 0), fx=XSTEP, fy=YSTEP, interpolation=cv2.INTER_NEAREST)
+        self.exp_y, self.exp_x = np.moveaxis(expand_yx,-1,0).reshape(2,-1).astype(int)
+        
+        self.trim_y,self.trim_x = np.mgrid[TRIM_Y1:self.ydim-TRIM_Y2, 0:self.xdim].reshape(2,-1).astype(int)
+        
         xy_map = np.mgrid[0:self.ydim, 0:self.xdim].astype(float)
         xy_map[0,:] -= self.midy
         xy_map[1,:] -= self.midx
         xy_map[0,:] /= self.ydim # normalize to 0.5 = half height
         xy_map[1,:] /= self.xdim
-        self.tensxy = torch.stack([torch.tensor(xy_map[1], device=self.PTDEV), 
-                                    torch.tensor(xy_map[0], device=self.PTDEV)],dim=-1)
+        self.tensxy = torch.stack([torch.tensor(xy_map[1], dtype=torch.float64), 
+                                    torch.tensor(xy_map[0], dtype=torch.float64)],dim=-1)
                             
-        self.base_axis = torch.eye(3, dtype=float, device=self.PTDEV)
+        self.base_axis = torch.eye(3, dtype=float)
         # projection scalars
         tanfovx = 2*np.tan(HFOV/2)
         tanfovy = 2*np.tan(VFOV/2)
-        self.fov = torch.tensor([tanfovx,tanfovy,1], device=self.PTDEV)
-        self.rand = np.random.rand(self.ydim, self.xdim)*40+15 # "fixed" random Z-data
+        self.fov = torch.tensor([tanfovx,tanfovy,1])
+        self.rand = np.random.rand(self.ydim, self.xdim)*0+0.001 # "fixed" random Z-data
         
         self.base_ang = np.array([0,0],dtype=np.float32)
         self.delta_ang = np.array([0,0],dtype=np.float32)
         self.mouse_xy = np.array([0,0],dtype=np.float32)
         self.moving = False
         
+        self.last_cam = torch.zeros(3, dtype=torch.float64)
+        self.last_TX = torch.zeros(3, dtype=torch.float64)
+        self.last_Z = 0.01*torch.ones([self.ydim, self.xdim], dtype=torch.float64)
+        
     def get_rot_mat(self, yaw, pitch): # roll is not used in fps
-        t0 = torch.tensor(0., dtype=float, device=self.PTDEV)
-        t1 = torch.tensor(1., dtype=float, device=self.PTDEV)
+        t0 = torch.tensor(0., dtype=float)
+        t1 = torch.tensor(1., dtype=float)
         cy = torch.cos(yaw)
         sy = torch.sin(yaw)
         cp = torch.cos(pitch)
@@ -68,25 +77,34 @@ class MotionAnalyzer(ImgTask.ImgTask):
                         torch.stack([t0,sp,cp]),])
         return ymat @ pmat
         
+    def get_2drot_mat(self, angle):
+        t0 = torch.tensor(0., dtype=float)
+        t1 = torch.tensor(1., dtype=float)
+        cy = torch.cos(angle)
+        sy = torch.sin(angle)
+        rmat = torch.stack([torch.stack([cy,sy]),
+                        torch.stack([-sy,cy])])
+        return rmat
+        
     # simulate the motion we would see with known angles / translations
     # Use this as basis for optimizer
-    def sim_motion(self, Z, XY, base_ang=None, rot_ang=None, translate=[0,0,0]):
+    def sim_motion(self, Z, XY, base_ang=None, rot_ang=None, TX=None):
         if base_ang is None:
-            base_ang=(torch.tensor(0., device=self.PTDEV),
-                        torch.tensor(0., device=self.PTDEV))
+            base_ang=torch.zeros(2)
         if rot_ang is None:
-            rot_ang=(torch.tensor(0., device=self.PTDEV),
-                    torch.tensor(0., device=self.PTDEV))
+            rot_ang=torch.zeros(2)
+        if TX is None:
+            TX=torch.zeros(3)
+            
         # delta yaw is affected by base pitch due to gimbal lock issues, so need to guess the base pitch
         baserot = self.get_rot_mat(0*base_ang[0], -base_ang[1]) # base rotation always yaw=0
         axis = baserot @ self.base_axis # align axis for later projection
         deltarot = self.get_rot_mat(-rot_ang[0], rot_ang[1])
-        TX = torch.tensor(translate, device=self.PTDEV)
         
         # create screen to world map
-        pad = torch.ones(XY.shape[0], 1, device=self.PTDEV) 
+        pad = torch.ones(XY.shape[0], 1) 
         pts = torch.cat((XY,pad),1) # X = x*Z
-        pts = pts * Z[:, None] * self.fov
+        pts = (pts / Z[:, None]) * self.fov
         pts = baserot @ (pts.T)
 
         new_pts = (deltarot @ pts).T + TX # turn back to (...,3) for inner product
@@ -95,104 +113,84 @@ class MotionAnalyzer(ImgTask.ImgTask):
         
         # delta flow in screen space
         # new x - orig x
-        scr_scale = torch.tensor([self.xdim, self.ydim], device=self.PTDEV)
+        scr_scale = torch.tensor([self.xdim, self.ydim])
         flow = (proj[:,:2]-XY)*scr_scale
         
         return flow
         
-    def flow_loss(self, x, *args):
-        x = torch.tensor(x, device=self.PTDEV, requires_grad=True)
-        bpitch, dyaw, dpitch = x
-        byaw = torch.tensor(0., device=self.PTDEV)
-        flow, Z, XY = args
+    def flow_loss(self, flow, cam, Z, TX, *args):
+        Z_TARG = 0.1
+        bpitch, dyaw, dpitch = cam
+        byaw = torch.tensor(0.)
+        XY, last_Z, last_TX = args
         
-        simflow = self.sim_motion(Z, XY, (byaw,bpitch), (dyaw,dpitch))
+        simflow = self.sim_motion(Z, XY, [byaw,bpitch], [dyaw,dpitch], TX)
         dx = (simflow-flow)
         flow_mag = (torch.norm(dx, dim=-1))**0.65 # squared error biases towards outliers, flatten a bit
-        result = flow_mag.sum()
+        result = flow_mag.sum()/flow.shape[0]
         result.backward()
-        return result.detach().cpu(), x.grad.cpu()
+        return result
         
-    def get_cam_params(self, flow, flow_est=None):
-        solvers = ['Nelder-Mead',
-            'Powell',
-            'CG',
-            'BFGS',
-            'Newton-CG',
-            'L-BFGS-B',
-            'TNC',
-            'COBYLA',
-            'SLSQP',
-            'trust-constr',
-            'dogleg',
-            'trust-ncg',
-            'trust-exact',
-            'trust-krylov',]
+    def get_cam_params(self, flow):
         flow_mag = np.linalg.norm(flow[self.y,self.x], axis=-1)
         moving = flow_mag>0.25 # filter down to reduce work on non-movement
         if moving.sum()>1000:
             fy = self.y[moving]
             fx = self.x[moving]
-            fy[-1] = self.midy
-            fx[-1] = self.midx
+            #fy[-1] = self.midy
+            #fx[-1] = self.midx
             
-            # x0 = base pitch, delta yaw, delta pitch,
-            bounds = [(-np.pi/2, np.pi/2),(-1, 1),(-1, 1),]
-                    #(-1, 1),(-1, 1),(-1, 1),]
-            guess = np.zeros(N_CAM_PARAMS, dtype=float)
-            guess[0] = self.base_ang[1]
-            guess[1] = self.delta_ang[0]
-            guess[2] = self.delta_ang[1]
-            
-            inflow = torch.tensor(flow[fy,fx], device=self.PTDEV)
-            Z = torch.tensor(self.rand[fy,fx], device=self.PTDEV)
+            inflow = torch.tensor(flow[fy,fx], dtype=torch.float64)
             XY = self.tensxy[fy,fx]
-            fit = optimize.minimize(self.flow_loss, method=solvers[5], 
-                                    x0=guess, args=(inflow, Z, XY),
-                                    jac=True, bounds=bounds)
             
-            base_ang = (0, fit.x[0])
-            delta_ang = (fit.x[1], fit.x[2])
-            self.base_ang += delta_ang # dead reckoning for base angle (TODO: weigh in predicted base angle)
+            cam = self.last_cam.clone().detach().requires_grad_(True)
+            Z = self.last_Z[fy,fx].clone().detach()
+            TX = self.last_TX.clone().detach()
             
-            return fit, np.array([0,0])
+            cam_lr = 2e-3
+            cam_solver = torch.optim.Adam([{'params': cam, 'lr': cam_lr}])
+            for i in range(30):
+                cam_solver.zero_grad()
+                loss = self.flow_loss(inflow, cam, Z, TX, XY, self.last_Z[fy,fx], self.last_TX)
+                cam_solver.step()
+            
+            self.last_cam[:] = cam.detach()
+            #self.last_Z[fy,fx] = Z.detach()
+            #self.last_TX[:] = TX.detach()
         else:
-            return None, None
+            self.last_cam[1:] = 0.
+        return self.last_cam.cpu().numpy()
+            
+    def expand_Z(self):
+        self.last_Z[self.trim_y, self.trim_x] = self.last_Z[self.exp_y,self.exp_x]
             
     def requires(self):
-        return [ImgTask.IMG_FLOW, ImgTask.IMG_ABSD]
+        return [ImgTask.IMG_FLOW, ImgTask.IMG_ABSD, ImgTask.VAL_FRAMENUM]
         
     def outputs(self):
-        return ['pred_cam']
+        return ['pred_cam']#, ImgTask.IMG_DEBUG]
         
-    def proc_frame(self, flow, abs_delta):
+    def proc_frame(self, flow, abs_delta, frame_num):
+        if CUDA and torch.cuda.is_available():
+            torch.set_default_device('cuda')
         # movement threshold
         self.moving = False
         VAL_THRES = 20
         COUNT_THRES = int(0.003*self.xdim*self.ydim*self.depth)
         if (abs_delta > VAL_THRES).sum() > COUNT_THRES:
             self.moving = True
-        flow2 = np.zeros_like(flow)
-        base_ang = np.zeros(2)
-        delta_ang = np.zeros(2)
-        mouse_xy = np.zeros(2)
-        TX = np.zeros(3)
-        cam_params = np.zeros(N_CAM_PARAMS)
-        if self.moving: # only calculate optic flow if sufficient movement
-            tst = time.time_ns()
-            fit, mxy = self.get_cam_params(flow, flow2)
-            ten = time.time_ns()
-            #print ('cam_params= %3.3fms'%((ten-tst)/1e6))
+        #dbg_img = np.zeros([self.ydim, self.xdim, 1], dtype=float)
+        tst = time.time_ns()
+        self.get_cam_params(flow)
+        ten = time.time_ns()
+        #print ('cam_params= %3.3fms'%((ten-tst)/1e6))
+        #self.expand_Z()
+        #print ('%d  %0.2f %s %s'%(frame_num, self.last_loss, 100*self.last_cam.cpu().numpy(), 100*self.last_TX.cpu().numpy()))
+        #print ('%d  %0.2f %s %s'%(frame_num, self.last_loss, self.last_cam.cpu().numpy(), self.last_TX.cpu().numpy()), file=self.log_target)
+        cam_params = self.last_cam.cpu().numpy()
+        return cam_params#, dbg_img
 
-            if fit is not None:
-                cam_params[:] = fit.x
-                mouse_xy = mxy
-                base_ang = (0, fit.x[0])
-                delta_ang = np.array([fit.x[1], fit.x[2]])
-                
-        self.delta_ang = delta_ang
-        self.mouse_xy = mouse_xy
-            
-        return cam_params
-
+def add_log_target(stream):
+    instance.log_target = stream
+    
 instance = MotionAnalyzer()

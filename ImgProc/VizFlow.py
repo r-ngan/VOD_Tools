@@ -46,10 +46,10 @@ class VizFlow(ImgTask.ImgTask):
         return (np.clip(vis,0,1.)*255).astype(np.uint8)
             
     def requires(self):
-        return ['flow']
+        return [ImgTask.IMG_FLOW]
         
     def outputs(self):
-        return ['debug']
+        return [ImgTask.IMG_DEBUG]
         
     def proc_frame(self, flow):
         mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])

@@ -22,11 +22,6 @@ class MouseTrack(ImgTask.ImgTask):
         self.ts_static = None # last seen timestamp
         self.ts_moving = None
         self.fsm_inmotion = False
-        self.track_hist = []
-        
-    def clear(self, timestamp, x, y):
-        self.track_hist.clear()
-        self.fsm_inmotion = False
             
     def requires(self):
         return [ImgTask.VAL_FRAMENUM, 'pred_cam', 'bothead_closest']
@@ -74,29 +69,6 @@ class MouseTrack(ImgTask.ImgTask):
             self.ts_static = timestamp
             
         return events
-            
-    def draw_hist(self, img):
-        ang = np.array([0,0])
-        angscalar = np.array([self.xdim/FlowAnalyzer.HFOV,
-                            self.ydim/FlowAnalyzer.VFOV])
-        #angscalar=1
-        mid = np.array([self.midx, self.midy])
-
-        for xy in self.track_hist[::-1]:
-            mag = np.linalg.norm(xy)
-            MAG_LIM = 2.*np.pi/180
-            mag = min(MAG_LIM,mag) # cap to limit
-            color = [0,128*mag/MAG_LIM,200*mag/MAG_LIM]
-            color = tuple(int(x) for x in color)
-            newang = ang+xy
-            loc = (ang)*angscalar+mid
-            newloc = (newang)*angscalar+mid
-            x1 = int(loc[0])
-            y1 = int(loc[1])
-            x2 = int(newloc[0])
-            y2 = int(newloc[1])
-            cv2.line(img, (x1,y1), (x2,y2), color, int(1.5+2.*mag/MAG_LIM))
-            ang = newang
         
 
 instance = MouseTrack()

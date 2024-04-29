@@ -66,13 +66,6 @@ class RangeStats(ImgTask.ImgTask):
             self.event(**e)
         return True
         
-    def unroll(self, eventdict): # convert dict format into list
-        res = []
-        for k,v in eventdict.items():
-            if v is not None:
-                res.extend(v)
-        return res
-        
     def event(self, timestamp, topic, **data):
         if (topic == VODEvents.BOT_NONE):
             if self.is_empty('B2'): # latch trigger
@@ -114,7 +107,7 @@ class RangeStats(ImgTask.ImgTask):
         self.df['t_mouse'] = (self.df['M1'] - self.df['B1']) * self.ms_fr
         self.df['t_static'] = (self.df['K1']-self.df['M1']) * self.ms_fr
         self.df['t_shoot'] = (self.df['M2'] - self.df['B1']) * self.ms_fr
-        self.df['d_target'] = self.df['Bpos2'].apply(lambda x: math.sqrt(x[0]**2+x[1]**2) if pd.notna(x) else math.inf)
+        self.df['d_target'] = self.df['Bpos2'].apply(lambda x: math.sqrt(x[0]**2+x[1]**2) if pd.notna(x) else math.nan)
         self.df['t_stop'] = (self.df['M2'] - self.df['K2']) * self.ms_fr
         
         self.df['hit'] = (self.df['t_stop']>=STOP_TIME) & (self.df['d_target']<=HEAD_RAD)

@@ -15,9 +15,9 @@ class VizDelta(ImgTask.ImgTask):
         return [ImgTask.IMG_DELTA]
         
     def outputs(self):
-        outs = [ImgTask.IMG_DEBUG]
+        return [ImgTask.IMG_DEBUG]
 
     def proc_frame(self, frame):
-        return frame
+        return frame*120
 
 _ = VizDelta()
