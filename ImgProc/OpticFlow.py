@@ -37,7 +37,7 @@ class OpticFlow(ImgTask.ImgTask):
         
     def proc_frame(self, frame, lframe, abs_delta):        
         # movement threshold
-        moving = True
+        moving = False
         VAL_THRES = 20
         COUNT_THRES = int(0.003*self.xdim*self.ydim*self.depth)
         if (abs_delta > VAL_THRES).sum() > COUNT_THRES:

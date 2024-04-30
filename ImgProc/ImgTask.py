@@ -17,6 +17,7 @@ IMG_ABSD = 'abs_delta'
 IMG_FLOW = 'flow'
 IMG_DEBUG = 'debug'
 
+CUDA = False
 class ImgTask():
     def __init__(self, xdim=0, ydim=0, depth=0):
         self.xdim = 0

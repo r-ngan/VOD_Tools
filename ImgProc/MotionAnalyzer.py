@@ -9,7 +9,6 @@ from scipy.special import huber
 
 from ImgProc import ImgTask
             
-CUDA = False
 XFACTOR = 0.
 YFACTOR = 0.
 ZFACTOR = 0.
@@ -21,15 +20,15 @@ class MotionAnalyzer(ImgTask.ImgTask):
 
     def initialize(self, **kwargs):
         super().initialize(**kwargs)
-        if CUDA and torch.cuda.is_available():
+        if ImgTask.CUDA and torch.cuda.is_available():
             torch.set_default_device('cuda')
         # optimizer is not working well with GPU-CPU thrashing
                 
         # subsample to increase speed
         self.XSTEP = XSTEP = self.xdim//40
         self.YSTEP = YSTEP = self.ydim//40
-        TRIM_Y1 = self.ydim//12 # 90px at 1080p
-        TRIM_Y2 = self.ydim//12
+        TRIM_Y1 = self.ydim//10 # 108px at 1080p
+        TRIM_Y2 = self.ydim//10
         yx = np.mgrid[TRIM_Y1+YSTEP/2:self.ydim-TRIM_Y2:YSTEP, XSTEP/2:self.xdim:XSTEP]
         self.y,self.x = yx.reshape(2,-1).astype(int)
         
@@ -61,6 +60,8 @@ class MotionAnalyzer(ImgTask.ImgTask):
         self.last_cam = torch.zeros(3, dtype=torch.float64)
         self.last_TX = torch.zeros(3, dtype=torch.float64)
         self.last_Z = 0.01*torch.ones([self.ydim, self.xdim], dtype=torch.float64)
+        
+        self.move_thres = int(0.4*self.y.shape[0]) # analyze if more than 40% moving
         
     def get_rot_mat(self, yaw, pitch): # roll is not used in fps
         t0 = torch.tensor(0., dtype=float)
@@ -122,19 +123,23 @@ class MotionAnalyzer(ImgTask.ImgTask):
         Z_TARG = 0.1
         bpitch, dyaw, dpitch = cam
         byaw = torch.tensor(0.)
-        XY, last_Z, last_TX = args
+        XY, last_Z = args
         
         simflow = self.sim_motion(Z, XY, [byaw,bpitch], [dyaw,dpitch], TX)
         dx = (simflow-flow)
         flow_mag = (torch.norm(dx, dim=-1))**0.65 # squared error biases towards outliers, flatten a bit
-        result = flow_mag.sum()/flow.shape[0]
+        ang_dx = 1e1*(bpitch-self.last_cam[0])**2 # avoid shifting base angle outside of dead reckoning
+        result = flow_mag.sum()/flow.shape[0] + ang_dx
         result.backward()
         return result
         
-    def get_cam_params(self, flow):
+    def get_cam_params(self, flow, depth_map):
         flow_mag = np.linalg.norm(flow[self.y,self.x], axis=-1)
         moving = flow_mag>0.25 # filter down to reduce work on non-movement
-        if moving.sum()>1000:
+        flow_mean = flow_mag.mean()
+        static = (depth_map[self.y,self.x]>0.6).numpy() & (flow_mag<flow_mean) # close but little motion is probably static
+        moving = moving & ~static
+        if moving.sum()>self.move_thres:
             fy = self.y[moving]
             fx = self.x[moving]
             #fy[-1] = self.midy
@@ -143,35 +148,56 @@ class MotionAnalyzer(ImgTask.ImgTask):
             inflow = torch.tensor(flow[fy,fx], dtype=torch.float64)
             XY = self.tensxy[fy,fx]
             
+            self.last_cam[0] += self.last_cam[2] # dead reckoning of base pitch
             cam = self.last_cam.clone().detach().requires_grad_(True)
-            Z = self.last_Z[fy,fx].clone().detach()
-            TX = self.last_TX.clone().detach()
+            Z = depth_map[fy,fx] # use predicted depth from NN
+            TX = self.last_TX.clone().detach().requires_grad_(True)
             
             cam_lr = 2e-3
+            tx_lr = 4e-4
             cam_solver = torch.optim.Adam([{'params': cam, 'lr': cam_lr}])
-            for i in range(30):
+            tx_solver = torch.optim.Adam([{'params': TX, 'lr': tx_lr}])
+            all_solver = torch.optim.Adam([
+                                        {'params': cam, 'lr': cam_lr},
+                                        {'params': TX, 'lr': tx_lr},
+                                        ])
+
+            for i in range(0):
+                tx_solver.zero_grad()
+                loss = self.flow_loss(inflow, cam, Z, TX, XY, self.last_Z[fy,fx])
+                tx_solver.step()
+            for i in range(0):
                 cam_solver.zero_grad()
-                loss = self.flow_loss(inflow, cam, Z, TX, XY, self.last_Z[fy,fx], self.last_TX)
+                loss = self.flow_loss(inflow, cam, Z, TX, XY, self.last_Z[fy,fx])
                 cam_solver.step()
+            for i in range(30):
+                all_solver.zero_grad()
+                loss = self.flow_loss(inflow, cam, Z, TX, XY, self.last_Z[fy,fx])
+                all_solver.step()
+                #with torch.no_grad():
+                #    cam[:] *= 0
+            self.last_loss = loss.detach().cpu().numpy()
             
             self.last_cam[:] = cam.detach()
             #self.last_Z[fy,fx] = Z.detach()
-            #self.last_TX[:] = TX.detach()
+            self.last_TX[:] = TX.detach()
         else:
+            self.last_loss = 0.
             self.last_cam[1:] = 0.
+            self.last_TX[:] = 0.
         return self.last_cam.cpu().numpy()
             
     def expand_Z(self):
         self.last_Z[self.trim_y, self.trim_x] = self.last_Z[self.exp_y,self.exp_x]
             
     def requires(self):
-        return [ImgTask.IMG_FLOW, ImgTask.IMG_ABSD, ImgTask.VAL_FRAMENUM]
+        return [ImgTask.IMG_FLOW, ImgTask.IMG_ABSD, 'depth', ImgTask.VAL_FRAMENUM]
         
     def outputs(self):
         return ['pred_cam']#, ImgTask.IMG_DEBUG]
         
-    def proc_frame(self, flow, abs_delta, frame_num):
-        if CUDA and torch.cuda.is_available():
+    def proc_frame(self, flow, abs_delta, depth_map, frame_num):
+        if ImgTask.CUDA and torch.cuda.is_available():
             torch.set_default_device('cuda')
         # movement threshold
         self.moving = False
@@ -181,7 +207,7 @@ class MotionAnalyzer(ImgTask.ImgTask):
             self.moving = True
         #dbg_img = np.zeros([self.ydim, self.xdim, 1], dtype=float)
         tst = time.time_ns()
-        self.get_cam_params(flow)
+        self.get_cam_params(flow, depth_map)
         ten = time.time_ns()
         #print ('cam_params= %3.3fms'%((ten-tst)/1e6))
         #self.expand_Z()

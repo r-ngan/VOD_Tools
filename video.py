@@ -19,6 +19,7 @@ import ImgProc.OpticFlow
 import ImgProc.BotFind
 import ImgProc.BotTrack
 import ImgProc.BestBot
+import ImgProc.nnDepth
 import ImgProc.MotionAnalyzer
 import ImgProc.MouseTrack
 #import ImgProc.VizDelta
@@ -27,6 +28,7 @@ import ImgProc.MouseTrack
 #import ImgProc.VizPredict
 #import ImgProc.VizBots
 #import ImgProc.VizTrack
+#import ImgProc.VizTemp
 import InputAnalyzer
 import PoseAnalyzer
 import RangeStats

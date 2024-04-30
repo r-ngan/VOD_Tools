@@ -13,7 +13,7 @@ class VizMotion(ImgTask.ImgTask):
 
     def initialize(self, **kwargs):
         super().initialize(**kwargs)
-        if MotionAnalyzer.CUDA and torch.cuda.is_available():
+        if ImgTask.CUDA and torch.cuda.is_available():
             torch.set_default_device('cuda')
                 
         self.xy_map = np.mgrid[0:self.ydim, 0:self.xdim].astype(float)
@@ -26,17 +26,17 @@ class VizMotion(ImgTask.ImgTask):
                                 torch.tensor(self.xy_map[0])],dim=-1)
         
     def requires(self):
-        return ['pred_cam', ImgTask.IMG_FLOW]
+        return ['pred_cam', ImgTask.IMG_FLOW, 'depth']
         
     def outputs(self):
         return [ImgTask.IMG_DEBUG]
         
-    def proc_frame(self, pred_cam, flow):
-        if MotionAnalyzer.CUDA and torch.cuda.is_available():
+    def proc_frame(self, pred_cam, flow, depth_map):
+        if ImgTask.CUDA and torch.cuda.is_available():
             torch.set_default_device('cuda')
         XY = self.tensxy[self.allfy,self.allfx]
         cam = pred_cam
-        Z = MotionAnalyzer.instance.last_Z[self.allfy,self.allfx]
+        Z = depth_map[self.allfy,self.allfx] #MotionAnalyzer.instance.last_Z[self.allfy,self.allfx]
         TX = MotionAnalyzer.instance.last_TX
         flow2 = self.sim_motion(cam, Z, TX, XY).reshape(self.ydim, self.xdim, 2)
         flow2 = flow2.cpu().numpy()
@@ -64,7 +64,7 @@ class VizMotion(ImgTask.ImgTask):
         
         
     def sim_motion(self, cam, Z, TX, XY):
-        bpitch, dyaw, dpitch = cam
+        bpitch, dyaw, dpitch = torch.tensor(cam)
         byaw = torch.tensor(0.)
         
         return MotionAnalyzer.instance.sim_motion(Z, XY, (byaw,bpitch), (dyaw,dpitch), TX)
