@@ -15,25 +15,23 @@ class PoseAnalyzer(ImgTask.ImgTask):
         self.game_state = VODState.VOD_IDLE
             
     def requires(self):
-        return ['frame_num', 'botposes']
+        return ['botposes']
         
     def outputs(self):
         return [VODEvents.EVENT_NODE]
         
-    def proc_frame(self, timestamp, poses):
+    def proc_frame(self, poses):
         events = []
         if self.game_state == VODState.VOD_BOT_ONSCREEN:
             if len(poses) < 1:
                 self.game_state = VODState.VOD_IDLE
-                events.append({'topic':VODEvents.BOT_NONE, 
-                                'timestamp':timestamp})
+                events.append({'topic':VODEvents.BOT_NONE})
             
         if self.game_state == VODState.VOD_IDLE: # full screen search
             if len(poses) > 0:
-                bx,by = poses[0]
+                bx,by = poses[0][:2]
                 self.game_state = VODState.VOD_BOT_ONSCREEN
                 events.append({'topic':VODEvents.BOT_APPEAR,
-                                'timestamp':timestamp,
                                 'x':bx,'y':by,})
         return events
     

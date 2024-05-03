@@ -1,11 +1,8 @@
 import math
 import time
-from pubsub import pub
 import numpy as np
 import cv2
 import torch
-from scipy import optimize
-from scipy.special import huber
 
 from ImgProc import ImgTask
             
@@ -16,12 +13,14 @@ HFOV = 103.*(np.pi/180)
 VFOV = 71.*(np.pi/180)
 N_CAM_PARAMS = 3
 # uses flow information to estimate movement
-class MotionAnalyzer(ImgTask.ImgTask):
+class CamExtract(ImgTask.ImgTask):
 
     def initialize(self, **kwargs):
         super().initialize(**kwargs)
         if ImgTask.CUDA and torch.cuda.is_available():
             torch.set_default_device('cuda')
+        else:
+            torch.set_default_device('cpu')
         # optimizer is not working well with GPU-CPU thrashing
                 
         # subsample to increase speed
@@ -128,7 +127,7 @@ class MotionAnalyzer(ImgTask.ImgTask):
         simflow = self.sim_motion(Z, XY, [byaw,bpitch], [dyaw,dpitch], TX)
         dx = (simflow-flow)
         flow_mag = (torch.norm(dx, dim=-1))**0.65 # squared error biases towards outliers, flatten a bit
-        ang_dx = 1e1*(bpitch-self.last_cam[0])**2 # avoid shifting base angle outside of dead reckoning
+        ang_dx = 1e1*(bpitch-self.last_cam[0]).abs()**2 # avoid shifting base angle outside of dead reckoning
         result = flow_mag.sum()/flow.shape[0] + ang_dx
         result.backward()
         return result
@@ -137,7 +136,7 @@ class MotionAnalyzer(ImgTask.ImgTask):
         flow_mag = np.linalg.norm(flow[self.y,self.x], axis=-1)
         moving = flow_mag>0.25 # filter down to reduce work on non-movement
         flow_mean = flow_mag.mean()
-        static = (depth_map[self.y,self.x]>0.6).numpy() & (flow_mag<flow_mean) # close but little motion is probably static
+        static = (depth_map[self.y,self.x]>0.7) & (flow_mag<flow_mean) # close but little motion is probably static
         moving = moving & ~static
         if moving.sum()>self.move_thres:
             fy = self.y[moving]
@@ -150,7 +149,7 @@ class MotionAnalyzer(ImgTask.ImgTask):
             
             self.last_cam[0] += self.last_cam[2] # dead reckoning of base pitch
             cam = self.last_cam.clone().detach().requires_grad_(True)
-            Z = depth_map[fy,fx] # use predicted depth from NN
+            Z = torch.from_numpy(depth_map[fy,fx]) # use predicted depth from NN
             TX = self.last_TX.clone().detach().requires_grad_(True)
             
             cam_lr = 2e-3
@@ -199,6 +198,8 @@ class MotionAnalyzer(ImgTask.ImgTask):
     def proc_frame(self, flow, abs_delta, depth_map, frame_num):
         if ImgTask.CUDA and torch.cuda.is_available():
             torch.set_default_device('cuda')
+        else:
+            torch.set_default_device('cpu')
         # movement threshold
         self.moving = False
         VAL_THRES = 20
@@ -219,4 +220,4 @@ class MotionAnalyzer(ImgTask.ImgTask):
 def add_log_target(stream):
     instance.log_target = stream
     
-instance = MotionAnalyzer()
+instance = CamExtract()

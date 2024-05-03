@@ -5,7 +5,7 @@ import cv2
 
 import VODEvents
 from ImgProc import ImgTask
-from ImgProc import MotionAnalyzer
+from ImgProc import MotionDisc as Motion
 
 # uses flow information to determine movement types
 class VizTrack(ImgTask.ImgTask):
@@ -43,8 +43,8 @@ class VizTrack(ImgTask.ImgTask):
             
     def draw_hist(self, img):
         ang = np.array([0,0])
-        angscalar = np.array([self.xdim/MotionAnalyzer.HFOV,
-                            self.ydim/MotionAnalyzer.VFOV])
+        angscalar = np.array([self.xdim/Motion.HFOV,
+                            self.ydim/Motion.VFOV])
         mid = np.array([self.midx, self.midy])
 
         for xy in self.track_hist[::-1]:

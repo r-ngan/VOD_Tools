@@ -7,7 +7,7 @@ from ultralytics import YOLO
 
 from ImgProc import ImgTask
 
-POSE_MODEL_PATH='assets/valbots640-pose.pt'
+POSE_MODEL_PATH='assets/valbotm640-pose.pt'
 POSE_MODEL_IMGSZ=(640)
 
 # find location of bots and presents them for analyzers to use
@@ -25,6 +25,7 @@ class BotFind(ImgTask.ImgTask):
         super().initialize(**kwargs)
         if torch.cuda.is_available():
             torch.cuda.set_device(0)
+            torch.set_default_device('cuda')
         self.finemodel = YOLO(POSE_MODEL_PATH)
         self.finedim = POSE_MODEL_IMGSZ
         self.filtcls = []

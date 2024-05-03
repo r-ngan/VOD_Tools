@@ -5,9 +5,11 @@ import json
 import numpy as np
 import cv2
 import torch
+import torchvision
 
 from ImgProc import ImgTask
 
+DOWNSCALE = 2
 class nnDepth(ImgTask.ImgTask):
 
     def initialize(self, **kwargs):
@@ -32,19 +34,21 @@ class nnDepth(ImgTask.ImgTask):
         if torch.cuda.is_available():
             torch.set_default_device('cuda')
             device = torch.device('cuda')
-        img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
+                        (0, 0), fx=1./DOWNSCALE, fy=1./DOWNSCALE)
         model_in = self.tx(img).to(device)
         with torch.no_grad():
             prediction = self.model(model_in)
 
             prediction = torch.nn.functional.interpolate(
                 prediction.unsqueeze(1),
-                size=frame.shape[:2],
+                size=img.shape[:2],
                 mode='bicubic',
                 align_corners=False,
             ).squeeze()
 
-        out = prediction.cpu()/2048. + 1e-5
+        out = prediction.cpu().numpy()/2048. + 1e-5
+        out = cv2.resize(out, (0, 0), fx=DOWNSCALE, fy=DOWNSCALE)
         return out
 
 _ = nnDepth()

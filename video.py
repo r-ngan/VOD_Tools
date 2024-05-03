@@ -14,16 +14,20 @@ import Capture
 from ImgProc import ImgTask, ImgEvents
 
 #import automatically activates the module
+from ImgProc import VideoSource
 import ImgProc.Delta
 import ImgProc.OpticFlow
 import ImgProc.BotFind
 import ImgProc.BotTrack
 import ImgProc.BestBot
-import ImgProc.nnDepth
-import ImgProc.MotionAnalyzer
-import ImgProc.MouseTrack
+#import ImgProc.nnDepth
+#import ImgProc.CamExtract
+#import ImgProc.MotionDisc
+#import ImgProc.MouseTrack
+import ImgProc.MoveStage
 #import ImgProc.VizDelta
 #import ImgProc.VizFlow
+import ImgProc.VizMoveHist
 #import ImgProc.VizMotion
 #import ImgProc.VizPredict
 #import ImgProc.VizBots
@@ -32,7 +36,6 @@ import ImgProc.MouseTrack
 import InputAnalyzer
 import PoseAnalyzer
 import RangeStats
-from ImgProc import VideoSource
 
 BATCH = False # batch mode don't print on screen
 
@@ -178,7 +181,7 @@ def main(args):
                         depth= depth,
                         frame_rate= frate,) # initialize all modules
         RangeStats.add_log_target(logstream)
-        ImgProc.MotionAnalyzer.add_log_target(logstream)
+        #ImgProc.MotionAnalyzer.add_log_target(logstream)
         # configure reduce nodes
         ImgTask.pipe.add_capture(ImgTask.IMG_DEBUG)
         ImgTask.pipe.add_capture(VODEvents.EVENT_NODE)

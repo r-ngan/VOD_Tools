@@ -38,10 +38,14 @@ class BotTrack(ImgTask.ImgTask):
         #print ('map= %3.3fms'%((ten-tst)/1e6))
         
         if len(self.bots)>0:
-            mid = np.array([self.midx, self.midy])
-            poses.extend([(x.last_head[:2]-mid).cpu().numpy() for x in self.bots])
+            poses.extend(self.center_head(self.bots))
 
         return poses
+        
+    def center_head(self, heads):
+        mid = np.array([self.midx, self.midy, 0.])
+        return [(x.last_head.cpu().numpy()-mid) for x in self.bots]
+        
         
     def draw_bots(self, debug=None):
         COL = [(0,0,255),

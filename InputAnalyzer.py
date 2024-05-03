@@ -28,33 +28,24 @@ class InputAnalyzer(ImgTask.ImgTask):
         self.kern = np.ones((key_size,key_size), np.float32)/(key_size**2)# sum all in square neighborhood
             
     def requires(self):
-        return [ImgTask.VAL_FRAMENUM, 'delta', 'bothead_closest']
+        return [ImgTask.IMG_DELTA]
         
     def outputs(self):
-        if DEBUG:
-            return [VODEvents.EVENT_NODE, 'debug']
-        else:
-            return [VODEvents.EVENT_NODE]
+        return [VODEvents.EVENT_NODE]
 
     # proc_frame signature must match requires / outputs
-    def proc_frame(self, timestamp, delta, bothead):
+    def proc_frame(self, delta):
         subimage = delta[self.y1:self.y2, self.x1:self.x2,:]
-        bx,by = bothead
         
         res = []
-        dbg_img = None
+        self.dbg_img = None
         for rule in self.detect:
             value = self.threshold(subimage, rule)
             if DEBUG:
-                dbg_img = value
+                self.dbg_img = value
             if (value.max()>rule['active']):
-                res.append({'topic': rule['event'],
-                            'timestamp':timestamp,
-                            'x':bx,'y':by,})
-        if DEBUG:
-            return res, dbg_img
-        else:
-            return res
+                res.append({'topic': rule['event']})
+        return res
         
     def threshold(self, img, rule):
         mask = cv2.inRange(img, rule['lowseg'], rule['uppseg']).astype(np.float32)/255. # 0 or 1 only

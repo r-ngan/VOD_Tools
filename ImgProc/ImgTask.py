@@ -19,7 +19,7 @@ IMG_DEBUG = 'debug'
 
 CUDA = False
 class ImgTask():
-    def __init__(self, xdim=0, ydim=0, depth=0):
+    def __init__(self, xdim=0, ydim=0, depth=0, **kwargs):
         self.xdim = 0
         self.ydim = 0
         self.midx = self.xdim//2
@@ -79,7 +79,7 @@ class ImgPipe():
         
     def run_pipe(self, ins, outs):
         try:
-            sol = self.dsp.dispatch(inputs=ins, outputs=outs, executor='async')
+            sol = self.dsp.dispatch(inputs=ins, outputs=outs)#, executor='async')
             self.sol = sol
             res = sol.result() # resolve async 
         except sh.utils.exc.DispatcherError as e: # out of frames

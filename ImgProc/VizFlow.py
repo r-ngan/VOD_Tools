@@ -4,12 +4,10 @@ import numpy as np
 import cv2
 
 from ImgProc import ImgTask
+from ImgProc.VizHeat import VizHeat
 
 DEBUG=True # module is only used for debugging
-            
-VIS_SIZE = 400
-VIS_SCALE = VIS_SIZE/ 80. # 80 px movement is full span
-KERN_SIZE = 15
+
 class VizFlow(ImgTask.ImgTask):
 
     def initialize(self, **kwargs):
@@ -27,23 +25,7 @@ class VizFlow(ImgTask.ImgTask):
         hsv = np.ones([self.ydim, self.xdim, 3], dtype=np.uint8)*255
         hsv[self.y, self.x, 0] = ang[...,0]*180/np.pi/2
         self.hue = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR).astype(np.float32)/255.
-        
-    def vizflow(self, flow, str_mod=1):
-        vis = np.zeros([VIS_SIZE,VIS_SIZE,3], dtype=np.float32)
-        flow_mag = np.linalg.norm(flow[self.y,self.x], axis=-1)
-        moving = flow_mag>0.25 # filter down to reduce work on non-movement
-        fy,fx = self.y[moving], self.x[moving]
-        #fy,fx = self.y, self.x
-        if moving.sum()>100:
-            flist = flow[fy,fx].reshape(-1,2)
-            uvs = flow[fy,fx].T *VIS_SCALE
-            locs = (np.clip(uvs, -VIS_SIZE/2, VIS_SIZE/2-1)+VIS_SIZE/2).astype(int)
-            px = (locs[1],locs[0])
-            
-            # sum up flow heatmap to xy grid
-            np.add.at(vis, px, self.STRENGTH*str_mod*self.hue[fy,fx]) # at allows repeated indices
-            vis = cv2.GaussianBlur(vis, (KERN_SIZE, KERN_SIZE), 1.) # smooth the heatmap
-        return (np.clip(vis,0,1.)*255).astype(np.uint8)
+        self.vizheat = VizHeat(span=80)
             
     def requires(self):
         return [ImgTask.IMG_FLOW]
@@ -66,9 +48,13 @@ class VizFlow(ImgTask.ImgTask):
         u,v = (x+flow[y,x,0]).round().astype(int), (y+flow[y,x,1]).round().astype(int)
         for x1,y1,x2,y2 in [(a,b,c,d) for a,b,c,d in zip (x,y, u,v) if a!=c or b!=d]:
             cv2.line(viz1, (x1,y1), (x2,y2), (0,255,0), 1)
-            
-        heatmap = self.vizflow(flow, str_mod=0.65)
-        viz1[:heatmap.shape[0],:heatmap.shape[1]] = heatmap
+        
+        flow_mag = np.linalg.norm(flow[self.y,self.x], axis=-1)
+        moving = flow_mag>0.25 # filter down to reduce work on non-movement
+        fy,fx = self.y[moving], self.x[moving]
+        flow_move = flow[fy,fx]
+        flow_hues = self.hue[fy,fx]
+        self.vizheat.proc_frame(viz1, flow_move, flow_hues*self.STRENGTH, str_mod=0.65)
         
         return viz1
 

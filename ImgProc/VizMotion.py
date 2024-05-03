@@ -5,7 +5,8 @@ import cv2
 import torch
 
 from ImgProc import ImgTask
-from ImgProc import VizFlow, MotionAnalyzer # dependency for generation
+from ImgProc import VizFlow # dependency for generation
+from ImgProc import MotionDisc as Motion
 
 DEBUG=True # module is only used for debugging
 
@@ -15,6 +16,8 @@ class VizMotion(ImgTask.ImgTask):
         super().initialize(**kwargs)
         if ImgTask.CUDA and torch.cuda.is_available():
             torch.set_default_device('cuda')
+        else:
+            torch.set_default_device('cpu')
                 
         self.xy_map = np.mgrid[0:self.ydim, 0:self.xdim].astype(float)
         self.allfy, self.allfx = self.xy_map.reshape(2,-1).astype(int)
@@ -26,18 +29,21 @@ class VizMotion(ImgTask.ImgTask):
                                 torch.tensor(self.xy_map[0])],dim=-1)
         
     def requires(self):
-        return ['pred_cam', ImgTask.IMG_FLOW, 'depth']
+        return ['pred_cam', ImgTask.IMG_FLOW]
         
     def outputs(self):
         return [ImgTask.IMG_DEBUG]
         
-    def proc_frame(self, pred_cam, flow, depth_map):
+    def proc_frame(self, pred_cam, flow):
         if ImgTask.CUDA and torch.cuda.is_available():
             torch.set_default_device('cuda')
+        else:
+            torch.set_default_device('cpu')
         XY = self.tensxy[self.allfy,self.allfx]
         cam = pred_cam
-        Z = depth_map[self.allfy,self.allfx] #MotionAnalyzer.instance.last_Z[self.allfy,self.allfx]
-        TX = MotionAnalyzer.instance.last_TX
+        #Z = depth_map[self.allfy,self.allfx]
+        Z = Motion.instance.last_Z[self.allfy,self.allfx]
+        TX = Motion.instance.last_TX
         flow2 = self.sim_motion(cam, Z, TX, XY).reshape(self.ydim, self.xdim, 2)
         flow2 = flow2.cpu().numpy()
         
@@ -67,6 +73,6 @@ class VizMotion(ImgTask.ImgTask):
         bpitch, dyaw, dpitch = torch.tensor(cam)
         byaw = torch.tensor(0.)
         
-        return MotionAnalyzer.instance.sim_motion(Z, XY, (byaw,bpitch), (dyaw,dpitch), TX)
+        return Motion.instance.sim_motion(Z, XY, (byaw,bpitch), (dyaw,dpitch), TX)
 
 instance = VizMotion()
