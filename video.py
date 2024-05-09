@@ -15,6 +15,8 @@ from ImgProc import ImgTask, ImgEvents
 
 #import automatically activates the module
 from ImgProc import VideoSource
+from ImgProc import VideoSourceCV2
+#from ImgProc import VideoSourceCompress
 import ImgProc.Delta
 import ImgProc.OpticFlow
 import ImgProc.BotFind
@@ -191,7 +193,7 @@ def main(args):
             cv2.setMouseCallback('VODTool', get_mouse)
         
         vidst = time.time_ns()
-        while(src.cap_ok()):
+        while(src.is_running()):
             tst = time.time_ns()
             try:
                 sol = ImgTask.pipe.run_pipe(ins=None, outs=outs)
@@ -222,10 +224,9 @@ def main(args):
                     output = np.array(src.frame)
                 frame_data = output
                     
-                #MoveAnalyzer.instance.draw_hist(output)
                 draw_text(output, mouse_text, 50,50)
-                
-                draw_text(output, '%d'%(frame_num), 1800,50)
+                draw_text(output, '%d'%(frame_num), 1800,45)
+                draw_text(output, '%d'%(int(src.get_video_ts())), 1800,75)
                 cv2.imshow('VODTool',output)
                 key = cv2.pollKey()
                 

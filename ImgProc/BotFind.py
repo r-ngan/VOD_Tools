@@ -7,7 +7,7 @@ from ultralytics import YOLO
 
 from ImgProc import ImgTask
 
-POSE_MODEL_PATH='assets/valbotm640-pose.pt'
+POSE_MODEL_PATH='assets/valbots640-pose.pt'
 POSE_MODEL_IMGSZ=(640)
 
 # find location of bots and presents them for analyzers to use

@@ -25,14 +25,15 @@ class VideoWriter(ImgTask.ImgTask):
             self.sink.release()
             
     def requires(self):
-        return [ImgTask.VAL_FRAMENUM, ImgTask.IMG_DEBUG]
+        return [ImgTask.VAL_FRAMENUM, ImgTask.VAL_TS, ImgTask.IMG_DEBUG]
         
     def outputs(self):
         return [WRITER_NODE]
 
-    def proc_frame(self, frame_num, frame):
+    def proc_frame(self, frame_num, ts, frame):
         img = self.filter_source(frame)
-        draw_text(img, '%d'%(frame_num), self.xdim-120,50)
+        draw_text(img, '%d'%(frame_num), self.xdim-120,45)
+        draw_text(img, '%d'%(ts), self.xdim-120,75)
         self.sink.write(img)
         return 0
         

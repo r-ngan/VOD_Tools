@@ -11,8 +11,8 @@ import VODEvents
 # 2) Coarse aim
 # 3) Fine aim / microadjust
 # 4) Target confirmation
-START_THRES = 2.5
-FINE_THRES = 2.1
+START_THRES = 2.4
+FINE_THRES = 2.3
 CONF_THRES = 1.1
 class MoveStage(ImgTask.ImgTask):
 
@@ -32,6 +32,7 @@ class MoveStage(ImgTask.ImgTask):
         self.flow_hist = [[0,0]]
         self.fsm = MoveFSM()
         self.data = {}
+        self.latent_max = 0 # latent movement prior to reaction
         
         self.fsm.add_enter_callback(self.enter)
         self.fsm.add_exit_callback(self.exit)
@@ -52,23 +53,28 @@ class MoveStage(ImgTask.ImgTask):
         return [ImgTask.IMG_FLOW, ImgTask.VAL_TS, VODEvents.EVENT_NODE]
         
     def outputs(self):
-        return ['move_hist']
+        return ['move_hist', 'fsm_move']
         
     def proc_frame(self, flow, timestamp, eventdict):
+        last_state = self.fsm.state
+        
         events = self.unroll(eventdict)
         for ev in events:
             if ev['topic'] == VODEvents.BOT_APPEAR:
                 self.fsm.transit(MoveFSM.BOT_APPEAR, ts=timestamp)
+                self.latent_max = np.inf
             if ev['topic'] in [VODEvents.MOUSE_LMB_DOWN, VODEvents.BOT_NONE]:
                 self.fsm.transit(MoveFSM.COOLDOWN, ts=timestamp)
             if ev['topic'] == VODEvents.BOT_NONE:
                 self.fsm.transit(MoveFSM.IDLE, ts=timestamp)
                 
-        move = self.get_flow_params(flow)
         # analyze type of movement
+        move = self.get_flow_params(flow)
         mag = np.linalg.norm(move)
-        #print (mag)
-        if (self.fsm.state==MoveFSM.BOT_APPEAR) and mag>START_THRES:
+        if (self.fsm.state==MoveFSM.BOT_APPEAR):
+            self.latent_max = min(self.latent_max, mag)
+            
+        if (self.fsm.state==MoveFSM.BOT_APPEAR) and mag>START_THRES+self.latent_max:
             self.fsm.transit(MoveFSM.ADJ_COARSE, ts=timestamp)
         elif (self.fsm.state==MoveFSM.ADJ_COARSE) and mag<FINE_THRES:
             self.fsm.transit(MoveFSM.ADJ_FINE, ts=timestamp)
@@ -82,7 +88,8 @@ class MoveStage(ImgTask.ImgTask):
             if len(self.flow_hist)>80:
                 self.flow_hist = self.flow_hist[-80:]
         
-        return np.array(self.flow_hist)
+        state_map = [last_state, self.fsm.state] # state data to convey change / current state
+        return np.array(self.flow_hist), state_map
         
     def enter(self, state, ts=None):
         #print ('enter state %s'%(state))
@@ -98,7 +105,7 @@ class MoveStage(ImgTask.ImgTask):
         elif state == MoveFSM.CONFIRM:
             self.data['conf0'] = ts
         elif state == MoveFSM.COOLDOWN:
-            print (self.data)
+            pass
 
     def exit(self, state, ts=None): # called with old state
         if state == MoveFSM.BOT_APPEAR:
