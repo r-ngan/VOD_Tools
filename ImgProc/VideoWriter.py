@@ -32,8 +32,8 @@ class VideoWriter(ImgTask.ImgTask):
 
     def proc_frame(self, frame_num, ts, frame):
         img = self.filter_source(frame)
-        draw_text(img, '%d'%(frame_num), self.xdim-120,45)
-        draw_text(img, '%d'%(ts), self.xdim-120,75)
+        draw_text(img, '%6d'%(frame_num), self.xdim-150,45)
+        draw_text(img, '%6d'%(ts), self.xdim-150,75)
         self.sink.write(img)
         return 0
         

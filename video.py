@@ -39,8 +39,6 @@ import InputAnalyzer
 import PoseAnalyzer
 import RangeStats
 
-BATCH = False # batch mode don't print on screen
-
 mousex = 0
 mousey = 0
 mouse_text = ''
@@ -122,6 +120,8 @@ def main(args):
                     help='start at offset frames into video')
     argp.add_argument('-m', '--manual', action='store_false',
                     help='turn off autoplay')
+    argp.add_argument('-b', '--batch', action='store_true',
+                    help='run batch mode headless')
     argp.add_argument('-d', '--dump', nargs='?', const='dump.mp4', default=None,
                     help='dump out debug frame to video file')
     params = argp.parse_args(args)
@@ -137,6 +137,8 @@ def main(args):
         from ImgProc import VideoWriter
         VideoWriter.path = params.dump
         print('Video writer imported')
+    BATCH = params.batch
+    autoplay = params.manual
         
     src.skip_to_frame(params.skip) # skip VOD preamble
     # 23-09-15 tricky bot appear: 1440, 2590
@@ -151,7 +153,6 @@ def main(args):
         outs.append(VideoWriter.WRITER_NODE)
     
     show_img = 0
-    autoplay = params.manual
     if not BATCH:
         def breakpoint(timestamp=0, x=0, y=0):
             nonlocal autoplay
@@ -160,7 +161,6 @@ def main(args):
         def filter_event(eventdict):
             events = unroll(eventdict, listed=True)
             for x in events:
-                #if False:
                 if x['topic'] == VODEvents.BOT_APPEAR: # break on certain events
                     breakpoint()
                     return 0
@@ -183,7 +183,6 @@ def main(args):
                         depth= depth,
                         frame_rate= frate,) # initialize all modules
         RangeStats.add_log_target(logstream)
-        #ImgProc.MotionAnalyzer.add_log_target(logstream)
         # configure reduce nodes
         ImgTask.pipe.add_capture(ImgTask.IMG_DEBUG)
         ImgTask.pipe.add_capture(VODEvents.EVENT_NODE)
@@ -225,8 +224,8 @@ def main(args):
                 frame_data = output
                     
                 draw_text(output, mouse_text, 50,50)
-                draw_text(output, '%d'%(frame_num), 1800,45)
-                draw_text(output, '%d'%(int(src.get_video_ts())), 1800,75)
+                draw_text(output, '%6d'%(frame_num), xdim-150,45)
+                draw_text(output, '%6d'%(int(src.get_video_ts())), xdim-150,75)
                 cv2.imshow('VODTool',output)
                 key = cv2.pollKey()
                 
@@ -248,29 +247,6 @@ def main(args):
                 if key==ord('k'): # play/pause
                     autoplay = not autoplay
                     continue
-                    
-                '''
-                PAUSE = True
-                if key==ord('w'): # replay frame
-                    FlowAnalyzer.YFACTOR += STEP_SIZE
-                elif key==ord('s'): # replay frame
-                    FlowAnalyzer.YFACTOR -= STEP_SIZE
-                elif key==ord('a'): # replay frame
-                    FlowAnalyzer.XFACTOR -= STEP_SIZE
-                elif key==ord('d'): # replay frame
-                    FlowAnalyzer.XFACTOR += STEP_SIZE
-                elif key==ord('z'): # replay frame
-                    FlowAnalyzer.ZFACTOR -= STEP_SIZE
-                elif key==ord('x'): # replay frame
-                    FlowAnalyzer.ZFACTOR += STEP_SIZE
-                else:
-                    PAUSE = False
-                if PAUSE:
-                    frame_num -= 1
-                    print ('factor=%s, %s, %s'%(FlowAnalyzer.XFACTOR,
-                                            FlowAnalyzer.YFACTOR,
-                                            FlowAnalyzer.ZFACTOR))
-                    break #'''
                 break # any other key is go next frame
             
             if key & 0xFF == ord('q'): # exit condition
@@ -278,15 +254,13 @@ def main(args):
                 
         viden = time.time_ns()
         avg_time = (viden-vidst)/(frame_num-params.skip)
-        print ('time elapsed = %3.3fs'%((viden-vidst)/1e9))
-        print ('avg per frame = %3.3fms'%(avg_time/1e6))
         pub.sendMessage(ImgEvents.DONE) # clean up modules
+    print ('\ntime elapsed = %3.3fs'%((viden-vidst)/1e9))
+    print ('avg per frame = %3.3fms'%(avg_time/1e6))
         
     #print ('total trials = %d'%(RangeStats.trial_count))
     
     cv2.destroyAllWindows()
-
-    print ('ok finished')
     
 
 

@@ -26,21 +26,30 @@ BOTPOS_OVERAIM = 'Bpos2'
 BOTPOS_LMB = 'Bpos3'
 class RangeStats(ImgTask.ImgTask):
     trial_count = 0
-    formatting = {
-        't_react' : {'desc':'Reaction time     ', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.mean()},
-        't_keyb'  : {'desc':'Reaction (kb)     ', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.mean()},
-        't_mouse' : {'desc':'Reaction (mouse)  ', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.mean()},
-        't_kbm'   : {'desc':'Delta of kb/mouse ', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.mean()},
+    formatting = [
+        {'key':None      ,'desc':'===Reaction time==='},
+        {'key':'t_react' ,'desc':'Mean              ', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.mean()},
+        {'key':'t_react' ,'desc':'Std               ', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.std()},
+        {'key':'t_keyb'  ,'desc':'Keypress          ', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.mean()},
+        {'key':'t_mouse' ,'desc':'Mouse             ', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.mean()},
+        {'key':'t_kbm'   ,'desc':'Delta of kb/mouse ', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.mean()},
+
+        {'key':None      ,'desc':'===Overaim==='},
+        {'key':'t_flick' ,'desc':'Time to flick mean', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.mean()},
+        {'key':'t_flick' ,'desc':'Time to flick std ', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.std()},
+        {'key':'d_over'  ,'desc':'Offset mean       ', 'unit':'px', 'prec':'%5.2f', 'func':lambda x: x.mean()},
+        {'key':'d_over'  ,'desc':'Offset std        ', 'unit':'px', 'prec':'%5.2f', 'func':lambda x: x.std()},
+
+        {'key':None      ,'desc':'===Movement==='},
+        {'key':'t_step'  ,'desc':'KB move time mean ', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.mean()},
+        {'key':'t_step'  ,'desc':'KB move time std  ', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.std()},
         
-        't_flick' : {'desc':'Time to flick past', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.mean()},
-        'd_over'  : {'desc':'Overaim offset    ', 'unit':'px', 'prec':'%5.2f', 'func':lambda x: x.mean()},
-        
-        't_step'  : {'desc':'KB move time      ', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.mean()},
-        't_conf'  : {'desc':'Confirm time      ', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.mean()},
-        
-        't_shoot' : {'desc':'Time to shoot     ', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.mean()},
-        'd_target': {'desc':'Head offset       ', 'unit':'px', 'prec':'%5.2f', 'func':lambda x: x.mean()},
-        'hit'     : {'desc':'Hits              ', 'unit':'%','prec':'%5d', 'func':lambda x: x.mean()*100},}
+        {'key':None      ,'desc':'===Firing==='},
+        {'key':'t_conf'  ,'desc':'Tgt confirm time  ', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.mean()},
+        {'key':'t_shoot' ,'desc':'Time to shoot mean', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.mean()},
+        {'key':'t_shoot' ,'desc':'Time to shoot std ', 'unit':'ms', 'prec':'%5.1f', 'func':lambda x: x.std()},
+        {'key':'d_target','desc':'Head offset       ', 'unit':'px', 'prec':'%5.2f', 'func':lambda x: x.mean()},
+        {'key':'hit'     ,'desc':'Kills             ', 'unit':'%','prec':'%5d', 'func':lambda x: x.mean()*100}, ]
         
     def __init__ (self, **kwargs):
         super().__init__(**kwargs)
@@ -172,13 +181,18 @@ class RangeStats(ImgTask.ImgTask):
                                 })
         for file in self.log_target:
             print(printdf, file=file)
-        for key in RangeStats.formatting.keys():
-            values = self.df[key]
-            meta = RangeStats.formatting[key]
-            stat = meta['func'](values)
-            fstring = '%s = ' + meta['prec'] +' %s'
+        for form in RangeStats.formatting:
+            key = form['key']
+            strout = ''
+            if key is None:
+                strout = form['desc']
+            else:
+                values = self.df[key]
+                stat = form['func'](values)
+                fstring = '%s = ' + form['prec'] +' %s'
+                strout = (fstring%(form['desc'], stat, form['unit']))
             for file in self.log_target:
-                print(fstring%(meta['desc'], stat, meta['unit']), file=file)
+                print(strout, file=file)
             
         
 def add_log_target(stream):
